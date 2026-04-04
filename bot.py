@@ -7,7 +7,6 @@ import hashlib
 import traceback
 import shutil
 import urllib.request
-import zipfile
 import platform
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
@@ -23,20 +22,10 @@ DOWNLOAD_DIR = "downloads"
 COMPRESSED_DIR = "compressed"
 CACHE_FILE = "video_cache.json"
 LOG_FILE = "bot_log.txt"
-TOOLS_DIR = "tools"
 
-for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
+for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR]:
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
-
-# Добавляем tools в PATH
-FFMPEG_PATH = os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin")
-NODE_PATH = os.path.join(os.getcwd(), TOOLS_DIR, "nodejs")
-
-if os.path.exists(FFMPEG_PATH):
-    os.environ['PATH'] = FFMPEG_PATH + os.pathsep + os.environ.get('PATH', '')
-if os.path.exists(NODE_PATH):
-    os.environ['PATH'] = NODE_PATH + os.pathsep + os.environ.get('PATH', '')
 
 # ==================== ЛОГИРОВАНИЕ ====================
 def log_message(msg: str, level: str = "INFO"):
@@ -68,71 +57,53 @@ def save_cache(cache):
 video_cache = load_cache()
 log_message(f"Загружено {len(video_cache)} записей")
 
-# ==================== УСТАНОВКА FFMPEG ДЛЯ WINDOWS ====================
+# ==================== УСТАНОВКА ДЛЯ LINUX ====================
 def check_ffmpeg() -> bool:
     """Проверка наличия FFmpeg"""
     try:
-        # Проверяем в tools папке
-        if platform.system() == "Windows":
-            ffmpeg_exe = os.path.join(FFMPEG_PATH, "ffmpeg.exe")
-        else:
-            ffmpeg_exe = os.path.join(FFMPEG_PATH, "ffmpeg")
-        
-        if os.path.exists(ffmpeg_exe):
-            log_message(f"✅ FFmpeg найден: {ffmpeg_exe}")
-            return True
-        
-        # Проверяем в PATH
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
-            log_message("✅ FFmpeg найден в PATH")
+            log_message("✅ FFmpeg найден")
             return True
     except:
         pass
-    
     log_message("❌ FFmpeg не найден")
     return False
 
-def install_ffmpeg_windows():
-    """Установка FFmpeg на Windows"""
+def check_nodejs() -> bool:
+    """Проверка наличия Node.js"""
     try:
-        log_message("🚀 Установка FFmpeg для Windows...")
+        result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            log_message(f"✅ Node.js найден: {result.stdout.strip()}")
+            return True
+    except:
+        pass
+    log_message("❌ Node.js не найден")
+    return False
+
+def install_ffmpeg_linux():
+    """Установка FFmpeg на Linux"""
+    try:
+        log_message("🚀 Установка FFmpeg для Linux...")
         
-        ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        zip_path = os.path.join(TOOLS_DIR, "ffmpeg.zip")
-        extract_path = os.path.join(TOOLS_DIR, "ffmpeg_temp")
-        
-        log_message("📥 Скачивание FFmpeg...")
-        urllib.request.urlretrieve(ffmpeg_url, zip_path)
-        
-        log_message("📦 Распаковка...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
-        
-        # Находим папку bin
-        for item in os.listdir(extract_path):
-            if item.startswith("ffmpeg-") and os.path.isdir(os.path.join(extract_path, item)):
-                bin_path = os.path.join(extract_path, item, "bin")
-                target_path = os.path.join(TOOLS_DIR, "ffmpeg", "bin")
-                
-                if os.path.exists(target_path):
-                    shutil.rmtree(target_path, ignore_errors=True)
-                
-                os.makedirs(target_path, exist_ok=True)
-                
-                # Копируем файлы
-                for file in os.listdir(bin_path):
-                    src = os.path.join(bin_path, file)
-                    dst = os.path.join(target_path, file)
-                    shutil.copy2(src, dst)
-                break
-        
-        # Очистка
-        os.remove(zip_path)
-        shutil.rmtree(extract_path, ignore_errors=True)
-        
-        # Обновляем PATH
-        os.environ['PATH'] = FFMPEG_PATH + os.pathsep + os.environ.get('PATH', '')
+        # Определяем дистрибутив
+        if os.path.exists('/etc/debian_version'):
+            # Debian/Ubuntu
+            log_message("📦 Обнаружен Debian/Ubuntu, устанавливаю через apt...")
+            subprocess.run(['sudo', 'apt', 'update'], check=True, capture_output=True)
+            subprocess.run(['sudo', 'apt', 'install', '-y', 'ffmpeg'], check=True, capture_output=True)
+        elif os.path.exists('/etc/redhat-release'):
+            # Red Hat/CentOS/Fedora
+            log_message("📦 Обнаружен Red Hat/Fedora, устанавливаю через dnf...")
+            subprocess.run(['sudo', 'dnf', 'install', '-y', 'ffmpeg'], check=True, capture_output=True)
+        elif os.path.exists('/etc/arch-release'):
+            # Arch Linux
+            log_message("📦 Обнаружен Arch Linux, устанавливаю через pacman...")
+            subprocess.run(['sudo', 'pacman', '-S', '--noconfirm', 'ffmpeg'], check=True, capture_output=True)
+        else:
+            log_message("⚠️ Не удалось определить дистрибутив", "WARNING")
+            return False
         
         log_message("✅ FFmpeg установлен успешно")
         return True
@@ -141,88 +112,42 @@ def install_ffmpeg_windows():
         log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
         return False
 
-def install_ffmpeg():
-    """Установка FFmpeg в зависимости от ОС"""
-    if platform.system() == "Windows":
-        return install_ffmpeg_windows()
-    else:
-        log_message(f"⚠️ Автоустановка для {platform.system()} не поддерживается", "WARNING")
-        log_message("Установите FFmpeg вручную: https://ffmpeg.org/download.html", "WARNING")
-        return False
-
-# ==================== УСТАНОВКА NODE.JS ДЛЯ WINDOWS ====================
-def check_nodejs() -> bool:
-    """Проверка наличия Node.js"""
+def install_nodejs_linux():
+    """Установка Node.js на Linux"""
     try:
-        # Проверяем в tools папке
-        if platform.system() == "Windows":
-            node_exe = os.path.join(NODE_PATH, "node.exe")
+        log_message("🚀 Установка Node.js для Linux...")
+        
+        # Определяем дистрибутив
+        if os.path.exists('/etc/debian_version'):
+            # Debian/Ubuntu
+            log_message("📦 Обнаружен Debian/Ubuntu, устанавливаю через NodeSource...")
+            
+            # Добавляем репозиторий NodeSource
+            node_setup = "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -"
+            subprocess.run(node_setup, shell=True, check=True, capture_output=True)
+            
+            # Устанавливаем Node.js
+            subprocess.run(['sudo', 'apt', 'install', '-y', 'nodejs'], check=True, capture_output=True)
+            
+        elif os.path.exists('/etc/redhat-release'):
+            # Red Hat/CentOS/Fedora
+            log_message("📦 Обнаружен Red Hat/Fedora, устанавливаю через dnf...")
+            subprocess.run(['sudo', 'dnf', 'module', 'enable', 'nodejs:20', '-y'], check=True, capture_output=True)
+            subprocess.run(['sudo', 'dnf', 'install', '-y', 'nodejs'], check=True, capture_output=True)
+            
+        elif os.path.exists('/etc/arch-release'):
+            # Arch Linux
+            log_message("📦 Обнаружен Arch Linux, устанавливаю через pacman...")
+            subprocess.run(['sudo', 'pacman', '-S', '--noconfirm', 'nodejs', 'npm'], check=True, capture_output=True)
         else:
-            node_exe = os.path.join(NODE_PATH, "bin", "node")
-        
-        if os.path.exists(node_exe):
-            log_message(f"✅ Node.js найден: {node_exe}")
-            return True
-        
-        # Проверяем в PATH
-        result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            log_message(f"✅ Node.js найден: {result.stdout.strip()}")
-            return True
-    except:
-        pass
-    
-    log_message("❌ Node.js не найден")
-    return False
-
-def install_nodejs_windows():
-    """Установка Node.js на Windows"""
-    try:
-        log_message("🚀 Установка Node.js для Windows...")
-        
-        node_url = "https://nodejs.org/dist/v20.11.0/node-v20.11.0-win-x64.zip"
-        zip_path = os.path.join(TOOLS_DIR, "nodejs.zip")
-        extract_path = os.path.join(TOOLS_DIR, "nodejs_temp")
-        
-        log_message("📥 Скачивание Node.js...")
-        urllib.request.urlretrieve(node_url, zip_path)
-        
-        log_message("📦 Распаковка...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
-        
-        # Находим папку
-        for item in os.listdir(extract_path):
-            if item.startswith("node-v") and os.path.isdir(os.path.join(extract_path, item)):
-                source_path = os.path.join(extract_path, item)
-                target_path = NODE_PATH
-                
-                if os.path.exists(target_path):
-                    shutil.rmtree(target_path, ignore_errors=True)
-                
-                shutil.copytree(source_path, target_path)
-                break
-        
-        # Очистка
-        os.remove(zip_path)
-        shutil.rmtree(extract_path, ignore_errors=True)
-        
-        # Обновляем PATH
-        os.environ['PATH'] = NODE_PATH + os.pathsep + os.environ.get('PATH', '')
+            log_message("⚠️ Не удалось определить дистрибутив", "WARNING")
+            return False
         
         log_message("✅ Node.js установлен успешно")
         return True
         
     except Exception as e:
         log_message(f"Ошибка установки Node.js: {e}", "ERROR")
-        return False
-
-def install_nodejs():
-    """Установка Node.js в зависимости от ОС"""
-    if platform.system() == "Windows":
-        return install_nodejs_windows()
-    else:
-        log_message(f"⚠️ Автоустановка для {platform.system()} не поддерживается", "WARNING")
         return False
 
 def auto_install_all():
@@ -234,14 +159,14 @@ def auto_install_all():
     # Установка FFmpeg
     if not check_ffmpeg():
         log_message("⚠️ Устанавливаю FFmpeg...")
-        install_ffmpeg()
+        install_ffmpeg_linux()
     else:
         log_message("✅ FFmpeg уже установлен")
     
     # Установка Node.js
     if not check_nodejs():
         log_message("⚠️ Устанавливаю Node.js...")
-        install_nodejs()
+        install_nodejs_linux()
     else:
         log_message("✅ Node.js уже установлен")
     
@@ -261,27 +186,23 @@ def auto_install_all():
 def compress_video(input_path: str, target_size_mb: int = 48) -> str:
     """Сжатие видео до указанного размера"""
     try:
-        ffmpeg_exe = "ffmpeg"
-        ffprobe_exe = "ffprobe"
-        
-        # Используем локальную версию если есть
-        if platform.system() == "Windows":
-            local_ffmpeg = os.path.join(FFMPEG_PATH, "ffmpeg.exe")
-            local_ffprobe = os.path.join(FFMPEG_PATH, "ffprobe.exe")
-            if os.path.exists(local_ffmpeg):
-                ffmpeg_exe = local_ffmpeg
-                ffprobe_exe = local_ffprobe
+        # Проверяем наличие ffprobe
+        try:
+            subprocess.run(['ffprobe', '-version'], capture_output=True, check=True)
+        except:
+            log_message("❌ ffprobe не найден", "ERROR")
+            return None
         
         # Получаем длительность видео
         probe_cmd = [
-            ffprobe_exe, '-v', 'error', '-show_entries', 'format=duration',
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
             '-of', 'default=noprint_wrappers=1:nokey=1', input_path
         ]
         
         result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
         
         if result.returncode != 0 or not result.stdout:
-            log_message(f"Ошибка получения длительности: {result.stderr}", "ERROR")
+            log_message(f"Ошибка получения длительности", "ERROR")
             return None
         
         duration = float(result.stdout.strip())
@@ -291,7 +212,7 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
         # Рассчитываем битрейт
         target_bits = target_size_mb * 8 * 1024 * 1024
         video_bitrate = int(target_bits / duration)
-        video_bitrate = max(300000, min(video_bitrate, 3000000))
+        video_bitrate = max(300000, min(video_bitrate, 3000000))  # 0.3 - 3 Mbps
         
         # Выходной файл
         base_name = os.path.basename(input_path)
@@ -300,7 +221,7 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
         
         # Команда сжатия
         compress_cmd = [
-            ffmpeg_exe, '-i', input_path,
+            'ffmpeg', '-i', input_path,
             '-b:v', f'{video_bitrate}',
             '-b:a', '128k',
             '-c:v', 'libx264',
@@ -310,7 +231,7 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
             '-y', output_path
         ]
         
-        log_message(f"Сжатие: битрейт {video_bitrate} bps")
+        log_message(f"Сжатие: битрейт {video_bitrate} bps, длительность {duration:.1f} сек")
         
         result = subprocess.run(compress_cmd, capture_output=True, text=True, timeout=300)
         
@@ -739,11 +660,11 @@ async def main():
     print("📦 АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ")
     print("=" * 60)
     
+    # Автоустановка для Linux
     auto_install_all()
     
     print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
     print(f"🗜️ Папка сжатия: {os.path.abspath(COMPRESSED_DIR)}")
-    print(f"🔧 Папка инструментов: {os.path.abspath(TOOLS_DIR)}")
     print("=" * 60)
     print("✅ БОТ ГОТОВ!")
     print("=" * 60)
