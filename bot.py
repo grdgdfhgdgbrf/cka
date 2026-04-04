@@ -2,6 +2,9 @@ import os
 import asyncio
 import subprocess
 import sys
+import json
+import hashlib
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -9,12 +12,29 @@ from aiogram.enums import ParseMode
 from yt_dlp import YoutubeDL
 
 # ==================== КОНФИГУРАЦИЯ ====================
-# 👇 ПОСЛЕ ОТЗЫВА СТАРОГО ТОКЕНА - ВСТАВЬТЕ НОВЫЙ СЮДА!
+# 👇 ВСТАВЬТЕ ВАШ НОВЫЙ ТОКЕН СЮДА (ПОСЛЕ ОТЗЫВА СТАРОГО!)
 BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
 DOWNLOAD_DIR = "downloads"
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+CACHE_DIR = "cache"
+CACHE_FILE = "video_cache.json"
+
+for dir_name in [DOWNLOAD_DIR, CACHE_DIR]:
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name)
+
+# Загрузка кэша
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+video_cache = load_cache()
 
 # Форматы качества
 QUALITY_FORMATS = {
@@ -25,6 +45,16 @@ QUALITY_FORMATS = {
     "720p": "best[height<=720]",
     "1080p": "best[height<=1080]",
     "best": "best",
+}
+
+QUALITY_NAMES = {
+    "144p": "144p",
+    "240p": "240p",
+    "360p": "360p",
+    "480p": "480p",
+    "720p": "720p",
+    "1080p": "1080p",
+    "best": "Best"
 }
 
 # Настройки для аудио
@@ -62,6 +92,12 @@ def auto_install_ffmpeg():
         print(f"❌ Ошибка при установке FFmpeg: {e}")
         return False
 
+# ==================== ГЕНЕРАЦИЯ УНИКАЛЬНОГО ID ВИДЕО ====================
+def get_video_id(url: str, quality: str, file_type: str = "video") -> str:
+    """Генерирует уникальный ID для видео на основе URL, качества и типа"""
+    unique_string = f"{url}_{quality}_{file_type}"
+    return hashlib.md5(unique_string.encode()).hexdigest()
+
 # ==================== КЛАВИАТУРА ВЫБОРА ====================
 def get_quality_keyboard(url: str):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -77,9 +113,18 @@ def get_quality_keyboard(url: str):
     ])
     return keyboard
 
-# ==================== ФУНКЦИИ СКАЧИВАНИЯ ====================
+# ==================== ФУНКЦИИ СКАЧИВАНИЯ С КЭШИРОВАНИЕМ ====================
 def download_video_sync(url: str, quality: str):
-    """Скачивание видео с выбранным качеством"""
+    """Скачивание видео с кэшированием"""
+    video_id = get_video_id(url, quality, "video")
+    
+    # Проверяем кэш
+    if video_id in video_cache:
+        cached = video_cache[video_id]
+        if os.path.exists(cached['path']):
+            print(f"✅ Видео найдено в кэше: {cached['title']}")
+            return cached['path'], cached['title'], True  # True = из кэша
+    
     try:
         format_str = QUALITY_FORMATS.get(quality, "best[height<=720]")
         
@@ -108,16 +153,35 @@ def download_video_sync(url: str, quality: str):
                     if files:
                         filename = max(files, key=os.path.getmtime)
                     else:
-                        return None, None
+                        return None, None, False
             
-            return filename, title
+            # Сохраняем в кэш
+            video_cache[video_id] = {
+                'path': filename,
+                'title': title,
+                'quality': quality,
+                'url': url,
+                'date': datetime.now().isoformat()
+            }
+            save_cache(video_cache)
+            
+            return filename, title, False
             
     except Exception as e:
         print(f"Ошибка скачивания видео: {e}")
-        return None, None
+        return None, None, False
 
 def download_audio_sync(url: str):
-    """Скачивание только аудио в MP3"""
+    """Скачивание аудио с кэшированием"""
+    audio_id = get_video_id(url, "mp3", "audio")
+    
+    # Проверяем кэш
+    if audio_id in video_cache:
+        cached = video_cache[audio_id]
+        if os.path.exists(cached['path']):
+            print(f"✅ Аудио найдено в кэше: {cached['title']}")
+            return cached['path'], cached['title'], True
+    
     try:
         with YoutubeDL(AUDIO_OPTS) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -127,61 +191,56 @@ def download_audio_sync(url: str):
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.endswith('.mp3') and title in f:
                     filename = os.path.join(DOWNLOAD_DIR, f)
-                    return filename, title
+                    break
+            else:
+                files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
+                        if os.path.isfile(os.path.join(DOWNLOAD_DIR, f)) and f.endswith('.mp3')]
+                if files:
+                    filename = max(files, key=os.path.getmtime)
+                else:
+                    return None, None, False
             
-            files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
-                    if os.path.isfile(os.path.join(DOWNLOAD_DIR, f)) and f.endswith('.mp3')]
-            if files:
-                filename = max(files, key=os.path.getmtime)
-                return filename, title
+            # Сохраняем в кэш
+            video_cache[audio_id] = {
+                'path': filename,
+                'title': title,
+                'type': 'audio',
+                'url': url,
+                'date': datetime.now().isoformat()
+            }
+            save_cache(video_cache)
             
-            return None, None
+            return filename, title, False
             
     except Exception as e:
         print(f"Ошибка скачивания аудио: {e}")
-        return None, None
+        return None, None, False
 
 # ==================== ФУНКЦИЯ ОТПРАВКИ С ОБХОДОМ ЛИМИТА ====================
-async def send_file_auto(chat_id: int, file_path: str, title: str, quality: str, file_type: str = "video"):
-    """
-    Автоматически выбирает метод отправки в зависимости от размера файла:
-    - до 50 МБ: send_video (с плеером)
-    - более 50 МБ: send_document (как файл)
-    """
+async def send_file_auto(chat_id: int, file_path: str, title: str, quality: str, from_cache: bool = False):
+    """Автоматически выбирает метод отправки в зависимости от размера файла"""
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    LIMIT_VIDEO = 50  # Telegram лимит для видео
+    LIMIT_VIDEO = 50
     
-    if file_type == "audio":
-        # Аудио всегда отправляем через send_audio (лимит 50 МБ, но аудио редко превышает)
-        audio_file = FSInputFile(file_path)
-        await bot.send_audio(
-            chat_id=chat_id,
-            audio=audio_file,
-            caption=f"✅ *{title[:100]}*\n🎵 MP3 | {file_size_mb:.1f} МБ",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
+    cache_text = " (из кэша ⚡)" if from_cache else ""
     
-    # Для видео: проверяем размер
     if file_size_mb <= LIMIT_VIDEO:
-        # Маленькое видео - отправляем с плеером
         video_file = FSInputFile(file_path)
         await bot.send_video(
             chat_id=chat_id,
             video=video_file,
-            caption=f"✅ *{title[:100]}*\n📹 Качество: {quality} | {file_size_mb:.1f} МБ",
+            caption=f"✅ *{title[:100]}*{cache_text}\n📹 Качество: {quality} | {file_size_mb:.1f} МБ",
             supports_streaming=True,
             parse_mode=ParseMode.MARKDOWN
         )
     else:
-        # Большое видео - отправляем как документ (до 2 ГБ!)
         document_file = FSInputFile(file_path)
         await bot.send_document(
             chat_id=chat_id,
             document=document_file,
-            caption=f"✅ *{title[:100]}*\n"
+            caption=f"✅ *{title[:100]}*{cache_text}\n"
                     f"📹 Качество: {quality} | {file_size_mb:.1f} МБ\n\n"
-                    f"⚠️ *Видео превышает 50 МБ*, поэтому отправлено как файл.\n"
+                    f"⚠️ *Видео превышает 50 МБ*, отправлено как файл.\n"
                     f"📥 Скачайте файл, чтобы посмотреть видео.",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -194,13 +253,16 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "🎬 *Видео-Бот (без лимита 50 МБ!)*\n\n"
+        "🎬 *Видео-Бот (с кэшированием!)*\n\n"
+        "⚡ *Особенности:*\n"
+        "• Видео сохраняются в кэш\n"
+        "• При повторном запросе — *мгновенная отправка*\n"
+        "• Без повторного скачивания!\n\n"
         "Отправьте мне ссылку на видео, и я предложу:\n"
         "• Скачать в разном качестве (144p → 1080p)\n"
         "• Скачать только аудио (MP3)\n\n"
-        "🔥 *Важно:* Видео до 50 МБ придут с плеером.\n"
-        "🔥 *Видео от 50 МБ до 2 ГБ* придут как файл (скачайте и смотрите).\n\n"
-        "📖 /help — Подробнее",
+        "📖 /help — Подробнее\n"
+        "🗑️ /clear_cache — Очистить кэш",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -210,15 +272,67 @@ async def help_command(message: types.Message):
         "📖 *Как пользоваться:*\n\n"
         "1. Отправьте ссылку на видео\n"
         "2. Выберите нужное качество или аудио\n"
-        "3. Дождитесь загрузки\n\n"
-        "📦 *Лимиты Telegram:*\n"
-        "• Видео с плеером: до 50 МБ\n"
-        "• Файлы (send_document): до 2 ГБ\n"
-        "• Аудио: до 50 МБ\n\n"
-        "💡 *Совет:* Для больших видео используйте качество 480p или 720p — они весят меньше.\n\n"
+        "3. Дождитесь загрузки (первый раз)\n"
+        "4. При повторной отправке — *видео придёт мгновенно!*\n\n"
+        "📦 *Лимиты:*\n"
+        "• Видео до 50 МБ → с плеером\n"
+        "• Видео 50+ МБ → файл для скачивания\n"
+        "• Аудио → всегда с плеером\n\n"
+        "⚡ *Кэш:*\n"
+        "• Все скачанные видео сохраняются\n"
+        "• Повторная отправка занимает 1-2 секунды\n"
+        "• Команда /clear_cache — очистить кэш\n\n"
         "🔧 Команды:\n"
         "/start — Начать\n"
-        "/help — Помощь",
+        "/help — Помощь\n"
+        "/clear_cache — Очистить кэш\n"
+        "/stats — Статистика кэша",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+@dp.message(Command("clear_cache"))
+async def clear_cache_command(message: types.Message):
+    """Очистка кэша"""
+    global video_cache
+    deleted_count = 0
+    
+    # Удаляем физические файлы
+    for video_id, info in video_cache.items():
+        if os.path.exists(info['path']):
+            try:
+                os.remove(info['path'])
+                deleted_count += 1
+            except:
+                pass
+    
+    # Очищаем кэш
+    video_cache = {}
+    save_cache(video_cache)
+    
+    await message.answer(
+        f"🗑️ *Кэш очищен!*\n\n"
+        f"Удалено файлов: {deleted_count}\n"
+        f"Освобождено место на диске.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+@dp.message(Command("stats"))
+async def stats_command(message: types.Message):
+    """Статистика кэша"""
+    total_size = 0
+    for video_id, info in video_cache.items():
+        if os.path.exists(info['path']):
+            total_size += os.path.getsize(info['path'])
+    
+    size_mb = total_size / (1024 * 1024)
+    
+    await message.answer(
+        f"📊 *Статистика кэша*\n\n"
+        f"📁 Видео в кэше: {len(video_cache)}\n"
+        f"💾 Занято места: {size_mb:.1f} МБ ({size_mb/1024:.2f} ГБ)\n\n"
+        f"⚡ *Преимущество:*\n"
+        f"Повторные запросы этих видео будут\n"
+        f"отправлены мгновенно без скачивания!",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -240,7 +354,7 @@ async def handle_url(message: types.Message):
         "🎥 *Выберите опцию:*\n\n"
         "• Видео в разном качестве\n"
         "• Аудио в формате MP3\n\n"
-        "⚡ *Для больших видео (>50 МБ)*: файл придёт как документ, его можно скачать.",
+        "⚡ *Если видео уже скачивали раньше* — оно придёт мгновенно!",
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -265,16 +379,29 @@ async def handle_callback(callback: CallbackQuery):
     if action == "vid":
         quality = parts[1]
         url = parts[2]
+        quality_name = QUALITY_NAMES.get(quality, quality)
         
-        await callback.message.edit_text(
-            f"⏳ Скачиваю видео в качестве *{quality}*...\n"
-            f"Это может занять некоторое время.\n\n"
-            f"💡 Если видео большое (>50 МБ), оно придёт как файл для скачивания.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        # Проверяем, есть ли видео в кэше
+        video_id = get_video_id(url, quality, "video")
+        is_cached = video_id in video_cache and os.path.exists(video_cache[video_id]['path'])
+        
+        if is_cached:
+            await callback.message.edit_text(
+                f"⚡ *Видео найдено в кэше!*\n"
+                f"Отправляю мгновенно без скачивания...\n\n"
+                f"📹 Качество: {quality_name}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.message.edit_text(
+                f"⏳ Скачиваю видео в качестве *{quality_name}*...\n"
+                f"Это может занять некоторое время.\n\n"
+                f"💡 *При повторном запросе видео придёт мгновенно!*",
+                parse_mode=ParseMode.MARKDOWN
+            )
         
         loop = asyncio.get_event_loop()
-        file_path, title = await loop.run_in_executor(None, download_video_sync, url, quality)
+        file_path, title, from_cache = await loop.run_in_executor(None, download_video_sync, url, quality)
         
         if not file_path or not os.path.exists(file_path):
             await callback.message.edit_text(
@@ -296,25 +423,40 @@ async def handle_callback(callback: CallbackQuery):
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
-            await callback.message.edit_text(f"📤 Отправляю видео... ({file_size_mb:.1f} МБ)")
+            if from_cache:
+                await callback.message.edit_text(f"⚡ Отправляю видео из кэша...")
+            else:
+                await callback.message.edit_text(f"📤 Отправляю видео... ({file_size_mb:.1f} МБ)")
         
-        # Используем функцию с автоматическим выбором метода отправки
-        await send_file_auto(callback.message.chat.id, file_path, title, quality, "video")
+        await send_file_auto(callback.message.chat.id, file_path, title, quality_name, from_cache)
         
-        os.remove(file_path)
+        # Не удаляем файл, он остается в кэше!
         await callback.message.delete()
-        await callback.answer("✅ Готово!")
+        await callback.answer("✅ Готово!" if not from_cache else "⚡ Отправлено из кэша!")
         
     elif action == "audio":
         url = parts[1]
         
-        await callback.message.edit_text(
-            "⏳ Скачиваю аудио в формате MP3...\nЭто может занять некоторое время.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        # Проверяем кэш аудио
+        audio_id = get_video_id(url, "mp3", "audio")
+        is_cached = audio_id in video_cache and os.path.exists(video_cache[audio_id]['path'])
+        
+        if is_cached:
+            await callback.message.edit_text(
+                f"⚡ *Аудио найдено в кэше!*\n"
+                f"Отправляю мгновенно...",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await callback.message.edit_text(
+                "⏳ Скачиваю аудио в формате MP3...\n"
+                "Это может занять некоторое время.\n\n"
+                "💡 *При повторном запросе аудио придёт мгновенно!*",
+                parse_mode=ParseMode.MARKDOWN
+            )
         
         loop = asyncio.get_event_loop()
-        file_path, title = await loop.run_in_executor(None, download_audio_sync, url)
+        file_path, title, from_cache = await loop.run_in_executor(None, download_audio_sync, url)
         
         if not file_path or not os.path.exists(file_path):
             await callback.message.edit_text(
@@ -326,30 +468,34 @@ async def handle_callback(callback: CallbackQuery):
         
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
         
-        await callback.message.edit_text(f"📤 Отправляю аудио... ({file_size_mb:.1f} МБ)")
+        if from_cache:
+            await callback.message.edit_text(f"⚡ Отправляю аудио из кэша...")
+        else:
+            await callback.message.edit_text(f"📤 Отправляю аудио... ({file_size_mb:.1f} МБ)")
         
         audio_file = FSInputFile(file_path)
         await bot.send_audio(
             chat_id=callback.message.chat.id,
             audio=audio_file,
-            caption=f"✅ *{title[:100]}*\n🎵 MP3 | {file_size_mb:.1f} МБ",
+            caption=f"✅ *{title[:100]}*\n🎵 MP3 | {file_size_mb:.1f} МБ" + (" ⚡(из кэша)" if from_cache else ""),
             parse_mode=ParseMode.MARKDOWN
         )
         
-        os.remove(file_path)
         await callback.message.delete()
-        await callback.answer("✅ Готово!")
+        await callback.answer("✅ Готово!" if not from_cache else "⚡ Отправлено из кэша!")
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
     print("=" * 50)
     print("🤖 Бот запущен!")
-    print("🔥 Поддержка файлов до 2 ГБ (через send_document)")
+    print("⚡ Включено кэширование видео!")
+    print(f"📦 Видео в кэше: {len(video_cache)}")
     print("=" * 50)
     
     auto_install_ffmpeg()
     
     print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
+    print(f"💾 Файл кэша: {CACHE_FILE}")
     print("✅ Бот готов!")
     print("=" * 50)
     
