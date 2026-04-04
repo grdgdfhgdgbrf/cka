@@ -8,23 +8,25 @@ import traceback
 import shutil
 import urllib.request
 import zipfile
-import ctypes
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ParseMode
+from yt_dlp import YoutubeDL
 
 # ==================== КОНФИГУРАЦИЯ ====================
 # 👇 ВСТАВЬТЕ ВАШ НОВЫЙ ТОКЕН СЮДА
 BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
 DOWNLOAD_DIR = "downloads"
+CACHE_DIR = "cache"
 CACHE_FILE = "video_cache.json"
 LOG_FILE = "bot_log.txt"
 
-if not os.path.exists(DOWNLOAD_DIR):
-    os.makedirs(DOWNLOAD_DIR)
+for dir_name in [DOWNLOAD_DIR, CACHE_DIR]:
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name)
 
 # ==================== ЛОГИРОВАНИЕ ====================
 def log_message(msg: str, level: str = "INFO"):
@@ -55,27 +57,7 @@ def save_cache(cache):
         log_message(f"Ошибка сохранения кэша: {e}", "ERROR")
 
 video_cache = load_cache()
-
-# Форматы качества (исправленные)
-QUALITY_FORMATS = {
-    "144p": "bestvideo[height<=144]+bestaudio/best[height<=144]",
-    "240p": "bestvideo[height<=240]+bestaudio/best[height<=240]",
-    "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]",
-    "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
-    "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-    "best": "bestvideo+bestaudio/best",
-}
-
-QUALITY_NAMES = {
-    "144p": "144p",
-    "240p": "240p",
-    "360p": "360p",
-    "480p": "480p",
-    "720p": "720p",
-    "1080p": "1080p",
-    "best": "Best"
-}
+log_message(f"Загружено {len(video_cache)} записей кэша")
 
 # ==================== УСТАНОВКА NODE.JS (JavaScript Runtime) ====================
 def check_nodejs() -> bool:
@@ -102,19 +84,18 @@ def install_nodejs_windows():
         log_message(f"📥 Скачиваю Node.js с {node_url}")
         urllib.request.urlretrieve(node_url, installer_path)
         
-        # Устанавливаем в тихом режиме
+        # Устанавливаем тихо
         log_message("📦 Устанавливаю Node.js (это может занять минуту)...")
         subprocess.run(['msiexec', '/i', installer_path, '/quiet', '/norestart'], 
-                      capture_output=True, timeout=120)
+                       capture_output=True, timeout=120)
         
         # Добавляем в PATH
         node_path = r"C:\Program Files\nodejs"
-        if os.path.exists(node_path):
-            os.environ['PATH'] = node_path + os.pathsep + os.environ['PATH']
-            subprocess.run(f'setx /M PATH "{node_path};%PATH%"', shell=True, capture_output=True)
+        os.environ['PATH'] = node_path + os.pathsep + os.environ['PATH']
         
         # Очистка
-        os.remove(installer_path)
+        if os.path.exists(installer_path):
+            os.remove(installer_path)
         
         log_message("✅ Node.js установлен!")
         return check_nodejs()
@@ -123,27 +104,15 @@ def install_nodejs_windows():
         log_message(f"❌ Ошибка установки Node.js: {e}", "ERROR")
         return False
 
-def install_nodejs_alternative():
-    """Альтернативная установка Node.js через winget"""
-    try:
-        log_message("Пробую установить Node.js через winget...")
-        subprocess.run(['winget', 'install', 'OpenJS.NodeJS', '--silent'], 
-                      capture_output=True, timeout=120)
-        return check_nodejs()
-    except:
-        return False
-
-# ==================== УСТАНОВКА И ОБНОВЛЕНИЕ YT-DLP ====================
-def update_yt_dlp():
-    """Обновление yt-dlp до последней версии"""
-    try:
-        log_message("🔄 Обновляю yt-dlp до последней версии...")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'])
-        log_message("✅ yt-dlp обновлён!")
+def auto_install_nodejs():
+    """Автоустановка Node.js"""
+    if check_nodejs():
         return True
-    except Exception as e:
-        log_message(f"❌ Ошибка обновления yt-dlp: {e}", "ERROR")
-        return False
+    
+    log_message("⚠️ Node.js не найден, устанавливаю...")
+    if sys.platform == "win32":
+        return install_nodejs_windows()
+    return False
 
 # ==================== УСТАНОВКА FFMPEG ====================
 def check_ffmpeg() -> bool:
@@ -151,16 +120,19 @@ def check_ffmpeg() -> bool:
     try:
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            log_message("✅ FFmpeg найден")
+            log_message("✅ FFmpeg работает")
             return True
     except:
         pass
     
-    # Проверяем в C:\ffmpeg
-    if os.path.exists(r"C:\ffmpeg\bin\ffmpeg.exe"):
-        os.environ['PATH'] = r"C:\ffmpeg\bin" + os.pathsep + os.environ['PATH']
-        log_message("✅ FFmpeg найден в C:\\ffmpeg")
-        return True
+    # Проверяем в стандартных местах
+    possible_paths = [r"C:\ffmpeg\bin\ffmpeg.exe", r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"]
+    for path in possible_paths:
+        if os.path.exists(path):
+            bin_dir = os.path.dirname(path)
+            os.environ['PATH'] = bin_dir + os.pathsep + os.environ['PATH']
+            log_message(f"✅ FFmpeg найден по пути: {path}")
+            return True
     
     log_message("❌ FFmpeg не найден")
     return False
@@ -171,19 +143,25 @@ def install_ffmpeg_windows():
         log_message("🚀 Устанавливаю FFmpeg...")
         
         ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        zip_path = os.path.join(os.getcwd(), "ffmpeg.zip")
-        extract_path = os.path.join(os.getcwd(), "ffmpeg_extract")
+        zip_path = os.path.join(os.getcwd(), "ffmpeg_temp.zip")
+        extract_path = os.path.join(os.getcwd(), "ffmpeg_extract_temp")
         
+        log_message(f"📥 Скачиваю FFmpeg...")
         urllib.request.urlretrieve(ffmpeg_url, zip_path)
         
+        log_message("📦 Распаковываю...")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_path)
         
         # Находим bin папку
+        bin_path = None
         for root, dirs, files in os.walk(extract_path):
             if 'ffmpeg.exe' in files:
                 bin_path = root
                 break
+        
+        if not bin_path:
+            raise Exception("FFmpeg.exe не найден в архиве")
         
         target_path = r"C:\ffmpeg"
         target_bin = os.path.join(target_path, "bin")
@@ -198,7 +176,6 @@ def install_ffmpeg_windows():
         
         # Добавляем в PATH
         os.environ['PATH'] = target_bin + os.pathsep + os.environ['PATH']
-        subprocess.run(f'setx /M PATH "{target_bin};%PATH%"', shell=True, capture_output=True)
         
         # Очистка
         os.remove(zip_path)
@@ -211,66 +188,88 @@ def install_ffmpeg_windows():
         log_message(f"❌ Ошибка установки FFmpeg: {e}", "ERROR")
         return False
 
-# ==================== ФУНКЦИЯ СКАЧИВАНИЯ ВИДЕО (ИСПРАВЛЕННАЯ) ====================
+def auto_install_ffmpeg():
+    """Автоустановка FFmpeg"""
+    if check_ffmpeg():
+        return True
+    
+    log_message("⚠️ FFmpeg не найден, устанавливаю...")
+    if sys.platform == "win32":
+        return install_ffmpeg_windows()
+    return False
+
+# ==================== ФУНКЦИИ ДЛЯ ВИДЕО (ИСПРАВЛЕННЫЕ) ====================
 def get_video_id(url: str, quality: str, file_type: str = "video") -> str:
     unique_string = f"{url}_{quality}_{file_type}"
     return hashlib.md5(unique_string.encode()).hexdigest()
 
+def get_available_formats(url: str):
+    """Получение списка доступных форматов видео"""
+    try:
+        opts = {
+            'quiet': True,
+            'no_warnings': True,
+        }
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            formats = info.get('formats', [])
+            
+            available_heights = set()
+            for f in formats:
+                height = f.get('height')
+                if height and f.get('vcodec') != 'none':
+                    available_heights.add(height)
+            
+            return sorted(available_heights)
+    except Exception as e:
+        log_message(f"Ошибка получения форматов: {e}")
+        return []
+
 def download_video_sync(url: str, quality: str):
-    """Скачивание видео с исправленными форматами"""
+    """Скачивание видео с правильными настройками для YouTube"""
     video_id = get_video_id(url, quality, "video")
-    log_message(f"Скачивание видео: {url[:100]}, качество: {quality}")
     
     # Проверяем кэш
     if video_id in video_cache:
         cached = video_cache[video_id]
         if os.path.exists(cached['path']):
-            log_message(f"✅ Видео из кэша: {cached['title']}")
+            log_message(f"✅ Из кэша: {cached['title']}")
             return cached['path'], cached['title'], True
     
     try:
-        format_str = QUALITY_FORMATS.get(quality, "bestvideo+bestaudio/best")
+        # Определяем формат в зависимости от качества
+        quality_map = {
+            "144p": "bestvideo[height<=144]+bestaudio/best[height<=144]",
+            "240p": "bestvideo[height<=240]+bestaudio/best[height<=240]",
+            "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]",
+            "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
+            "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+            "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            "best": "bestvideo+bestaudio/best"
+        }
         
-        # ИСПРАВЛЕННЫЕ НАСТРОЙКИ для YouTube
+        format_str = quality_map.get(quality, "bestvideo[height<=720]+bestaudio/best")
+        
         opts = {
             'format': format_str,
             'outtmpl': f'{DOWNLOAD_DIR}/%(title)s_%(height)sp.%(ext)s',
+            'merge_output_format': 'mp4',
             'quiet': False,
             'no_warnings': False,
-            'merge_output_format': 'mp4',
             'ignoreerrors': True,
             'extract_flat': False,
-            'force_generic_extractor': False,
-            'extractor_args': {
-                'youtube': {
-                    'skip': ['dash', 'hls', 'live'],  # Пропускаем проблемные форматы
-                    'player_client': ['android', 'web'],  # Используем android клиент
-                }
-            },
-            'postprocessors': [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }],
+            'no_check_certificate': True,
+            'prefer_insecure': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            }
         }
         
-        # Используем yt-dlp с обновлёнными настройками
-        from yt_dlp import YoutubeDL
-        
         with YoutubeDL(opts) as ydl:
-            log_message("Получаю информацию о видео...")
-            
-            # Сначала получаем список доступных форматов
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                log_message("❌ Не удалось получить информацию", "ERROR")
-                return None, None, False
-            
-            # Логируем доступные форматы
-            if 'formats' in info:
-                available_heights = sorted(set(f.get('height', 0) for f in info['formats'] if f.get('height')))
-                log_message(f"Доступные качества: {available_heights}")
-            
-            # Скачиваем
+            log_message(f"Скачиваю видео: {url[:80]}, качество: {quality}")
             info = ydl.extract_info(url, download=True)
             
             title = info.get('title', 'video')
@@ -284,16 +283,16 @@ def download_video_sync(url: str, quality: str):
                         filename = os.path.join(DOWNLOAD_DIR, f)
                         break
                 else:
-                    files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
-                            if os.path.isfile(os.path.join(DOWNLOAD_DIR, f)) and f.endswith('.mp4')]
-                    if files:
-                        filename = max(files, key=os.path.getmtime)
+                    mp4_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
+                                if f.endswith('.mp4')]
+                    if mp4_files:
+                        filename = max(mp4_files, key=os.path.getmtime)
                     else:
                         log_message("❌ Файл не найден", "ERROR")
                         return None, None, False
             
             file_size = os.path.getsize(filename) / (1024 * 1024)
-            log_message(f"✅ Видео скачано: {title}, {file_size:.1f} МБ")
+            log_message(f"✅ Скачано: {title}, {file_size:.1f} МБ")
             
             video_cache[video_id] = {
                 'path': filename,
@@ -315,7 +314,6 @@ def download_video_sync(url: str, quality: str):
 def download_audio_sync(url: str):
     """Скачивание аудио"""
     audio_id = get_video_id(url, "mp3", "audio")
-    log_message(f"Скачивание аудио: {url[:100]}")
     
     if audio_id in video_cache:
         cached = video_cache[audio_id]
@@ -324,23 +322,19 @@ def download_audio_sync(url: str):
             return cached['path'], cached['title'], True
     
     try:
-        from yt_dlp import YoutubeDL
-        
         opts = {
             'format': 'bestaudio/best',
             'outtmpl': f'{DOWNLOAD_DIR}/%(title)s.%(ext)s',
             'quiet': False,
             'no_warnings': False,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web'],
-                }
-            },
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
         }
         
         with YoutubeDL(opts) as ydl:
@@ -353,10 +347,10 @@ def download_audio_sync(url: str):
                     filename = os.path.join(DOWNLOAD_DIR, f)
                     break
             else:
-                files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
-                        if os.path.isfile(os.path.join(DOWNLOAD_DIR, f)) and f.endswith('.mp3')]
-                if files:
-                    filename = max(files, key=os.path.getmtime)
+                mp3_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
+                            if f.endswith('.mp3')]
+                if mp3_files:
+                    filename = max(mp3_files, key=os.path.getmtime)
                 else:
                     return None, None, False
             
@@ -379,38 +373,10 @@ def download_audio_sync(url: str):
         log_message(f"❌ Ошибка: {e}", "ERROR")
         return None, None, False
 
-# ==================== АВТОМАТИЧЕСКАЯ УСТАНОВКА ВСЕГО ====================
-def auto_setup():
-    """Автоматическая установка всего необходимого"""
-    log_message("=" * 50)
-    log_message("🔧 ПРОВЕРКА И УСТАНОВКА КОМПОНЕНТОВ")
-    log_message("=" * 50)
-    
-    # 1. Обновляем yt-dlp
-    log_message("1️⃣ Проверяю yt-dlp...")
-    update_yt_dlp()
-    
-    # 2. Устанавливаем Node.js (нужен для YouTube)
-    log_message("2️⃣ Проверяю Node.js...")
-    if not check_nodejs():
-        log_message("Устанавливаю Node.js...")
-        if not install_nodejs_windows():
-            install_nodejs_alternative()
-    
-    # 3. Устанавливаем FFmpeg
-    log_message("3️⃣ Проверяю FFmpeg...")
-    if not check_ffmpeg():
-        log_message("Устанавливаю FFmpeg...")
-        install_ffmpeg_windows()
-    
-    log_message("=" * 50)
-    log_message("✅ ПРОВЕРКА ЗАВЕРШЕНА")
-    log_message("=" * 50)
-
-# ==================== ОТПРАВКА ФАЙЛОВ ====================
+# ==================== ОТПРАВКА ====================
 async def send_file_auto(chat_id: int, file_path: str, title: str, quality: str, from_cache: bool = False):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    cache_text = " (из кэша ⚡)" if from_cache else ""
+    cache_text = " ⚡(из кэша)" if from_cache else ""
     
     try:
         if file_size_mb <= 50:
@@ -427,10 +393,10 @@ async def send_file_auto(chat_id: int, file_path: str, title: str, quality: str,
             await bot.send_document(
                 chat_id=chat_id,
                 document=document_file,
-                caption=f"✅ *{title[:100]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ\n⚠️ Видео >50 МБ, отправлено как файл",
+                caption=f"✅ *{title[:100]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ",
                 parse_mode=ParseMode.MARKDOWN
             )
-        log_message(f"✅ Файл отправлен")
+        log_message(f"✅ Отправлен: {file_size_mb:.1f} МБ")
     except Exception as e:
         log_message(f"❌ Ошибка отправки: {e}", "ERROR")
         raise
@@ -459,46 +425,52 @@ def get_quality_keyboard(url: str):
 async def start_command(message: types.Message):
     await message.answer(
         "🎬 *Видео-Бот*\n\n"
-        "Отправьте ссылку на видео с YouTube, Instagram, TikTok и других сайтов.\n\n"
-        "🔧 /setup — Установить всё необходимое\n"
+        "Отправьте ссылку на видео с YouTube, Instagram, TikTok и др.\n\n"
+        "🔧 /check — Проверить установку\n"
+        "🗑️ /clear_cache — Очистить кэш\n"
         "📊 /stats — Статистика\n"
-        "🗑️ /clear_cache — Очистить кэш",
+        "📋 /log — Логи",
         parse_mode=ParseMode.MARKDOWN
     )
 
-@dp.message(Command("setup"))
-async def setup_command(message: types.Message):
-    await message.answer("🔧 Начинаю установку компонентов...\nЭто может занять 1-2 минуты.")
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, auto_setup)
-    await message.answer("✅ Установка завершена! Теперь бот готов к работе.")
-
-@dp.message(Command("stats"))
-async def stats_command(message: types.Message):
-    total_size = 0
-    for info in video_cache.values():
-        if os.path.exists(info.get('path', '')):
-            total_size += os.path.getsize(info['path'])
+@dp.message(Command("check"))
+async def check_command(message: types.Message):
+    msg = await message.answer("🔍 Проверка...")
     
-    node_ok = check_nodejs()
     ffmpeg_ok = check_ffmpeg()
+    node_ok = check_nodejs()
     
-    await message.answer(
-        f"📊 *Статистика*\n\n"
-        f"📁 В кэше: {len(video_cache)}\n"
-        f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
-        f"🟢 Node.js: {'✅' if node_ok else '❌'}\n"
-        f"🎬 FFmpeg: {'✅' if ffmpeg_ok else '❌'}\n\n"
-        f"Если что-то не работает, отправьте /setup",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    status = f"📊 *Статус установки:*\n\n"
+    status += f"✅ FFmpeg: {'✓' if ffmpeg_ok else '✗'}\n"
+    status += f"✅ Node.js: {'✓' if node_ok else '✗'}\n\n"
+    
+    if not ffmpeg_ok:
+        status += "🔄 Устанавливаю FFmpeg...\n"
+        await msg.edit_text(status)
+        auto_install_ffmpeg()
+        status = status.replace("✗", "✓" if check_ffmpeg() else "✗")
+    
+    if not node_ok:
+        status += "🔄 Устанавливаю Node.js...\n"
+        await msg.edit_text(status)
+        auto_install_nodejs()
+        status = status.replace("✗", "✓" if check_nodejs() else "✗")
+    
+    await msg.edit_text(status + "\n✅ Готово к работе!")
+
+@dp.message(Command("log"))
+async def log_command(message: types.Message):
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()[-30:]
+            await message.answer(f"📋 *Логи:*\n```\n{''.join(lines)[:3000]}\n```", parse_mode=ParseMode.MARKDOWN)
 
 @dp.message(Command("clear_cache"))
 async def clear_cache_command(message: types.Message):
     global video_cache
     deleted = 0
     for info in video_cache.values():
-        if os.path.exists(info.get('path', '')):
+        if os.path.exists(info['path']):
             try:
                 os.remove(info['path'])
                 deleted += 1
@@ -508,10 +480,26 @@ async def clear_cache_command(message: types.Message):
     save_cache(video_cache)
     await message.answer(f"🗑️ Очищено {deleted} файлов")
 
+@dp.message(Command("stats"))
+async def stats_command(message: types.Message):
+    total_size = 0
+    for info in video_cache.values():
+        if os.path.exists(info['path']):
+            total_size += os.path.getsize(info['path'])
+    await message.answer(
+        f"📊 *Статистика*\n\n"
+        f"📁 В кэше: {len(video_cache)}\n"
+        f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
+        f"⚡ FFmpeg: {'✅' if check_ffmpeg() else '❌'}\n"
+        f"🟢 Node.js: {'✅' if check_nodejs() else '❌'}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 # ==================== ОБРАБОТЧИКИ ====================
 @dp.message()
 async def handle_url(message: types.Message):
     url = message.text.strip()
+    log_message(f"Ссылка: {url[:100]}")
     
     if not (url.startswith("http://") or url.startswith("https://")):
         await message.answer("❌ Отправьте ссылку (http:// или https://)")
@@ -538,15 +526,15 @@ async def handle_callback(callback: CallbackQuery):
     if action == "vid":
         quality = parts[1]
         url = parts[2]
-        quality_name = QUALITY_NAMES.get(quality, quality)
+        quality_name = {"144p":"144p","240p":"240p","360p":"360p","480p":"480p","720p":"720p","1080p":"1080p","best":"Best"}.get(quality, quality)
         
-        await callback.message.edit_text(f"⏳ Скачиваю *{quality_name}*...", parse_mode=ParseMode.MARKDOWN)
+        await callback.message.edit_text(f"⏳ Скачиваю *{quality_name}*...\nЭто может занять 1-2 минуты", parse_mode=ParseMode.MARKDOWN)
         
         loop = asyncio.get_event_loop()
         file_path, title, from_cache = await loop.run_in_executor(None, download_video_sync, url, quality)
         
         if not file_path:
-            await callback.message.edit_text("❌ Ошибка скачивания.\nПопробуйте /setup для установки компонентов.")
+            await callback.message.edit_text("❌ Ошибка скачивания.\nСмотри /log")
             await callback.answer()
             return
         
@@ -585,10 +573,21 @@ async def main():
     print("🤖 БОТ ЗАПУЩЕН")
     print("=" * 60)
     
-    # Автоматическая установка всего при первом запуске
-    auto_setup()
+    # Установка необходимых компонентов
+    print("🔧 Проверка и установка зависимостей...")
     
-    print("✅ Бот готов к работе!")
+    if not check_ffmpeg():
+        print("⚠️ Установка FFmpeg...")
+        auto_install_ffmpeg()
+    
+    if not check_nodejs():
+        print("⚠️ Установка Node.js...")
+        auto_install_nodejs()
+    
+    print(f"📁 Папка: {os.path.abspath(DOWNLOAD_DIR)}")
+    print(f"📄 Логи: {LOG_FILE}")
+    print("=" * 60)
+    print("✅ Бот готов!")
     print("=" * 60)
     
     await dp.start_polling(bot)
