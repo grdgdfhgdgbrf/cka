@@ -6,6 +6,9 @@ import json
 import hashlib
 import traceback
 import shutil
+import urllib.request
+import zipfile
+import ctypes
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -17,8 +20,8 @@ from yt_dlp import YoutubeDL
 # 👇 ВСТАВЬТЕ ВАШ НОВЫЙ ТОКЕН СЮДА (ПОСЛЕ ОТЗЫВА СТАРОГО!)
 BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
-# ID администратора для получения логов (можно оставить None)
-ADMIN_ID = 5356400377  # Вставьте ваш Telegram ID, например: 123456789
+# ID администратора для получения логов (опционально)
+ADMIN_ID = 5356400377
 
 DOWNLOAD_DIR = "downloads"
 CACHE_DIR = "cache"
@@ -31,21 +34,14 @@ for dir_name in [DOWNLOAD_DIR, CACHE_DIR]:
 
 # ==================== ЛОГИРОВАНИЕ ====================
 def log_message(msg: str, level: str = "INFO"):
-    """Запись лога в файл и вывод в консоль"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] [{level}] {msg}"
     print(log_entry)
-    
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(log_entry + "\n")
-
-async def send_log_to_admin(text: str):
-    """Отправка лога администратору"""
-    if ADMIN_ID:
-        try:
-            await bot.send_message(ADMIN_ID, f"📋 *Лог бота:*\n`{text[:3000]}`", parse_mode=ParseMode.MARKDOWN)
-        except:
-            pass
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_entry + "\n")
+    except:
+        pass
 
 # Загрузка кэша
 def load_cache():
@@ -88,139 +84,193 @@ QUALITY_NAMES = {
     "best": "Best"
 }
 
-# ==================== УЛУЧШЕННАЯ АВТОУСТАНОВКА FFMPEG ====================
+# ==================== ИСПРАВЛЕННАЯ УСТАНОВКА FFMPEG ====================
+def add_to_system_path(path_to_add: str):
+    """Добавление пути в системную переменную PATH"""
+    try:
+        # Получаем текущий PATH
+        result = subprocess.run(['reg', 'query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', '/v', 'Path'], 
+                                capture_output=True, text=True)
+        current_path = ""
+        for line in result.stdout.split('\n'):
+            if 'Path' in line and 'REG_' in line:
+                current_path = line.split('    ')[-1].strip()
+                break
+        
+        if path_to_add not in current_path:
+            new_path = f"{current_path};{path_to_add}"
+            # Обновляем системный PATH
+            subprocess.run(f'setx /M PATH "{new_path}"', shell=True, capture_output=True)
+            log_message(f"✅ PATH обновлён: добавлен {path_to_add}")
+            
+            # Обновляем PATH в текущем процессе
+            os.environ['PATH'] = os.environ['PATH'] + os.pathsep + path_to_add
+            return True
+        return True
+    except Exception as e:
+        log_message(f"Ошибка обновления PATH: {e}", "ERROR")
+        return False
+
 def check_ffmpeg() -> bool:
     """Проверка наличия FFmpeg в системе"""
     try:
-        # Проверяем через where/which
-        if sys.platform == "win32":
-            result = subprocess.run(['where', 'ffmpeg'], capture_output=True, text=True)
-        else:
-            result = subprocess.run(['which', 'ffmpeg'], capture_output=True, text=True)
+        # Проверяем в стандартных местах
+        possible_paths = [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\ffmpeg.exe"
+        ]
         
-        if result.returncode == 0:
-            log_message(f"✅ FFmpeg найден: {result.stdout.strip()}")
-            return True
+        for path in possible_paths:
+            if os.path.exists(path):
+                log_message(f"✅ FFmpeg найден по пути: {path}")
+                # Добавляем директорию в PATH если нужно
+                bin_dir = os.path.dirname(path)
+                if bin_dir not in os.environ['PATH']:
+                    os.environ['PATH'] = os.environ['PATH'] + os.pathsep + bin_dir
+                return True
         
-        # Прямая проверка
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        # Проверяем через команду
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            log_message("✅ FFmpeg работает")
+            log_message("✅ FFmpeg работает через командную строку")
             return True
+            
     except FileNotFoundError:
         pass
+    except Exception as e:
+        log_message(f"Ошибка проверки FFmpeg: {e}", "WARNING")
     
-    log_message("❌ FFmpeg не найден", "WARNING")
+    log_message("❌ FFmpeg не найден")
     return False
 
 def install_ffmpeg_windows():
-    """Установка FFmpeg на Windows"""
+    """Установка FFmpeg на Windows с автоматическим добавлением в PATH"""
     try:
-        log_message("Начинаю установку FFmpeg на Windows...")
+        log_message("🚀 Начинаю установку FFmpeg на Windows...")
         
         # Скачиваем FFmpeg
-        import urllib.request
-        import zipfile
-        
         ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        zip_path = os.path.join(os.getcwd(), "ffmpeg.zip")
-        extract_path = os.path.join(os.getcwd(), "ffmpeg_temp")
+        zip_path = os.path.join(os.getcwd(), "ffmpeg_temp.zip")
+        extract_path = os.path.join(os.getcwd(), "ffmpeg_extract_temp")
         
-        log_message(f"Скачиваю FFmpeg с {ffmpeg_url}")
+        log_message(f"📥 Скачиваю FFmpeg с {ffmpeg_url}")
         urllib.request.urlretrieve(ffmpeg_url, zip_path)
+        log_message("✅ Скачивание завершено")
         
         # Распаковываем
+        log_message("📦 Распаковываю архив...")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_path)
+        log_message("✅ Распаковка завершена")
         
-        # Находим папку bin
+        # Находим папку bin с ffmpeg.exe
+        bin_path = None
         for root, dirs, files in os.walk(extract_path):
             if 'ffmpeg.exe' in files:
                 bin_path = root
                 break
         
-        # Копируем в Program Files
+        if not bin_path:
+            log_message("❌ Не найден ffmpeg.exe в архиве", "ERROR")
+            return False
+        
+        log_message(f"📁 Найден FFmpeg в: {bin_path}")
+        
+        # Целевая папка
         target_path = r"C:\ffmpeg"
-        if not os.path.exists(target_path):
-            shutil.copytree(bin_path, target_path)
+        target_bin_path = os.path.join(target_path, "bin")
+        
+        # Удаляем старую папку если есть
+        if os.path.exists(target_path):
+            log_message("🗑️ Удаляю старую версию FFmpeg...")
+            shutil.rmtree(target_path, ignore_errors=True)
+        
+        # Создаём целевую папку и копируем
+        os.makedirs(target_bin_path, exist_ok=True)
+        
+        # Копируем все файлы из bin
+        for file in os.listdir(bin_path):
+            src = os.path.join(bin_path, file)
+            dst = os.path.join(target_bin_path, file)
+            shutil.copy2(src, dst)
+        
+        log_message(f"✅ FFmpeg скопирован в {target_bin_path}")
         
         # Добавляем в PATH
-        subprocess.run(f'setx PATH "%PATH%;{target_path}" /M', shell=True)
+        log_message("🔧 Добавляю FFmpeg в системный PATH...")
+        if add_to_system_path(target_bin_path):
+            log_message("✅ PATH обновлён успешно")
+        else:
+            log_message("⚠️ Не удалось обновить PATH автоматически", "WARNING")
         
-        # Очистка
-        os.remove(zip_path)
-        shutil.rmtree(extract_path)
+        # Очистка временных файлов
+        log_message("🧹 Очищаю временные файлы...")
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        if os.path.exists(extract_path):
+            shutil.rmtree(extract_path, ignore_errors=True)
         
-        log_message("✅ FFmpeg успешно установлен!")
-        return True
+        # Принудительно добавляем в текущий PATH
+        os.environ['PATH'] = target_bin_path + os.pathsep + os.environ['PATH']
         
+        # Проверяем установку
+        log_message("🔍 Проверяю установку FFmpeg...")
+        try:
+            result = subprocess.run([os.path.join(target_bin_path, 'ffmpeg.exe'), '-version'], 
+                                   capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                log_message("✅ FFmpeg успешно установлен и работает!")
+                return True
+            else:
+                log_message(f"❌ FFmpeg не работает: {result.stderr}", "ERROR")
+                return False
+        except Exception as e:
+            log_message(f"❌ Ошибка при проверке FFmpeg: {e}", "ERROR")
+            return False
+            
     except Exception as e:
-        log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
-        return False
-
-def install_ffmpeg_linux():
-    """Установка FFmpeg на Linux"""
-    try:
-        log_message("Устанавливаю FFmpeg на Linux...")
-        subprocess.run(['sudo', 'apt', 'update'], check=True)
-        subprocess.run(['sudo', 'apt', 'install', '-y', 'ffmpeg'], check=True)
-        log_message("✅ FFmpeg успешно установлен!")
-        return True
-    except Exception as e:
-        log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
+        log_message(f"❌ Ошибка установки FFmpeg: {e}", "ERROR")
+        log_message(traceback.format_exc(), "ERROR")
         return False
 
 def auto_install_ffmpeg():
-    """Автоматическая установка FFmpeg"""
+    """Автоматическая установка FFmpeg если не найден"""
     if check_ffmpeg():
+        log_message("✅ FFmpeg уже установлен")
         return True
     
-    log_message("FFmpeg не найден, начинаю автоматическую установку...")
+    log_message("⚠️ FFmpeg не найден, начинаю автоматическую установку...")
     
     if sys.platform == "win32":
         success = install_ffmpeg_windows()
     else:
-        success = install_ffmpeg_linux()
+        log_message("❌ Автоустановка только для Windows", "ERROR")
+        success = False
     
     if success:
-        # Проверяем после установки
-        os.environ['PATH'] = os.environ['PATH'] + os.pathsep + r"C:\ffmpeg"
+        log_message("✅ FFmpeg успешно установлен!")
         return check_ffmpeg()
-    
-    return False
+    else:
+        log_message("❌ Не удалось установить FFmpeg автоматически", "ERROR")
+        return False
 
 # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С ВИДЕО ====================
 def get_video_id(url: str, quality: str, file_type: str = "video") -> str:
-    """Генерация уникального ID"""
     unique_string = f"{url}_{quality}_{file_type}"
     return hashlib.md5(unique_string.encode()).hexdigest()
 
-def test_url_accessible(url: str) -> tuple:
-    """Проверка доступности URL"""
-    try:
-        import requests
-        response = requests.head(url, timeout=10, allow_redirects=True)
-        log_message(f"Проверка URL {url}: статус {response.status_code}")
-        return response.status_code < 400, response.status_code
-    except Exception as e:
-        log_message(f"Ошибка проверки URL: {e}", "WARNING")
-        return True, None  # Предполагаем, что доступно
-
 def download_video_sync(url: str, quality: str):
-    """Скачивание видео с кэшированием и подробным логированием"""
+    """Скачивание видео с кэшированием"""
     video_id = get_video_id(url, quality, "video")
-    log_message(f"Начинаю скачивание видео: {url}, качество: {quality}")
+    log_message(f"Скачивание видео: {url[:100]}, качество: {quality}")
     
     # Проверяем кэш
     if video_id in video_cache:
         cached = video_cache[video_id]
         if os.path.exists(cached['path']):
-            log_message(f"✅ Видео найдено в кэше: {cached['title']}")
+            log_message(f"✅ Видео из кэша: {cached['title']}")
             return cached['path'], cached['title'], True
-    
-    # Проверяем FFmpeg
-    if not check_ffmpeg():
-        log_message("❌ FFmpeg не установлен, скачивание может не работать", "ERROR")
     
     try:
         format_str = QUALITY_FORMATS.get(quality, "best[height<=720]")
@@ -228,36 +278,22 @@ def download_video_sync(url: str, quality: str):
         opts = {
             'format': format_str,
             'outtmpl': f'{DOWNLOAD_DIR}/%(title)s_%(height)sp.%(ext)s',
-            'quiet': False,  # Включаем вывод для логов
+            'quiet': False,
             'no_warnings': False,
             'merge_output_format': 'mp4',
-            'verbose': True,  # Подробные логи
         }
         
-        log_message(f"Параметры yt-dlp: {opts}")
-        
         with YoutubeDL(opts) as ydl:
-            # Получаем информацию
             log_message("Получаю информацию о видео...")
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(url, download=True)
             
             if not info:
-                log_message("❌ Не удалось получить информацию о видео", "ERROR")
+                log_message("❌ Не удалось получить информацию", "ERROR")
                 return None, None, False
-            
-            title = info.get('title', 'video')
-            duration = info.get('duration', 0)
-            log_message(f"Видео найдено: {title}, длительность: {duration} сек")
-            
-            # Скачиваем
-            log_message("Начинаю скачивание...")
-            info = ydl.extract_info(url, download=True)
             
             title = info.get('title', 'video')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             filename = ydl.prepare_filename(info)
-            
-            log_message(f"Ожидаемый файл: {filename}")
             
             # Ищем файл
             if not os.path.exists(filename):
@@ -270,15 +306,13 @@ def download_video_sync(url: str, quality: str):
                             if os.path.isfile(os.path.join(DOWNLOAD_DIR, f)) and f.endswith('.mp4')]
                     if files:
                         filename = max(files, key=os.path.getmtime)
-                        log_message(f"Найден альтернативный файл: {filename}")
                     else:
-                        log_message("❌ Файл не найден после скачивания", "ERROR")
+                        log_message("❌ Файл не найден", "ERROR")
                         return None, None, False
             
             file_size = os.path.getsize(filename) / (1024 * 1024)
-            log_message(f"✅ Видео скачано: {filename}, размер: {file_size:.1f} МБ")
+            log_message(f"✅ Видео скачано: {title}, {file_size:.1f} МБ")
             
-            # Сохраняем в кэш
             video_cache[video_id] = {
                 'path': filename,
                 'title': title,
@@ -292,19 +326,19 @@ def download_video_sync(url: str, quality: str):
             return filename, title, False
             
     except Exception as e:
-        log_message(f"❌ Ошибка скачивания видео: {e}", "ERROR")
+        log_message(f"❌ Ошибка: {e}", "ERROR")
         log_message(traceback.format_exc(), "ERROR")
         return None, None, False
 
 def download_audio_sync(url: str):
-    """Скачивание аудио с логированием"""
+    """Скачивание аудио"""
     audio_id = get_video_id(url, "mp3", "audio")
-    log_message(f"Начинаю скачивание аудио: {url}")
+    log_message(f"Скачивание аудио: {url[:100]}")
     
     if audio_id in video_cache:
         cached = video_cache[audio_id]
         if os.path.exists(cached['path']):
-            log_message(f"✅ Аудио найдено в кэше: {cached['title']}")
+            log_message(f"✅ Аудио из кэша: {cached['title']}")
             return cached['path'], cached['title'], True
     
     try:
@@ -313,7 +347,6 @@ def download_audio_sync(url: str):
             'outtmpl': f'{DOWNLOAD_DIR}/%(title)s.%(ext)s',
             'quiet': False,
             'no_warnings': False,
-            'verbose': True,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -322,13 +355,10 @@ def download_audio_sync(url: str):
         }
         
         with YoutubeDL(opts) as ydl:
-            log_message("Получаю информацию об аудио...")
             info = ydl.extract_info(url, download=True)
-            
             title = info.get('title', 'audio')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
-            # Ищем mp3 файл
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.endswith('.mp3') and title in f:
                     filename = os.path.join(DOWNLOAD_DIR, f)
@@ -339,11 +369,10 @@ def download_audio_sync(url: str):
                 if files:
                     filename = max(files, key=os.path.getmtime)
                 else:
-                    log_message("❌ MP3 файл не найден", "ERROR")
                     return None, None, False
             
             file_size = os.path.getsize(filename) / (1024 * 1024)
-            log_message(f"✅ Аудио скачано: {filename}, размер: {file_size:.1f} МБ")
+            log_message(f"✅ Аудио скачано: {title}, {file_size:.1f} МБ")
             
             video_cache[audio_id] = {
                 'path': filename,
@@ -358,41 +387,33 @@ def download_audio_sync(url: str):
             return filename, title, False
             
     except Exception as e:
-        log_message(f"❌ Ошибка скачивания аудио: {e}", "ERROR")
-        log_message(traceback.format_exc(), "ERROR")
+        log_message(f"❌ Ошибка: {e}", "ERROR")
         return None, None, False
 
-# ==================== ФУНКЦИЯ ОТПРАВКИ ====================
+# ==================== ОТПРАВКА ФАЙЛОВ ====================
 async def send_file_auto(chat_id: int, file_path: str, title: str, quality: str, from_cache: bool = False):
-    """Отправка файла с логированием"""
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    LIMIT_VIDEO = 50
-    
     cache_text = " (из кэша ⚡)" if from_cache else ""
-    log_message(f"Отправляю файл: {file_path}, размер: {file_size_mb:.1f} МБ, из кэша: {from_cache}")
     
     try:
-        if file_size_mb <= LIMIT_VIDEO:
+        if file_size_mb <= 50:
             video_file = FSInputFile(file_path)
             await bot.send_video(
                 chat_id=chat_id,
                 video=video_file,
-                caption=f"✅ *{title[:100]}*{cache_text}\n📹 Качество: {quality} | {file_size_mb:.1f} МБ",
+                caption=f"✅ *{title[:100]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ",
                 supports_streaming=True,
                 parse_mode=ParseMode.MARKDOWN
             )
-            log_message("✅ Видео отправлено (send_video)")
         else:
             document_file = FSInputFile(file_path)
             await bot.send_document(
                 chat_id=chat_id,
                 document=document_file,
-                caption=f"✅ *{title[:100]}*{cache_text}\n"
-                        f"📹 Качество: {quality} | {file_size_mb:.1f} МБ\n\n"
-                        f"⚠️ *Видео превышает 50 МБ*, отправлено как файл.",
+                caption=f"✅ *{title[:100]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ\n⚠️ Видео >50 МБ, отправлено как файл",
                 parse_mode=ParseMode.MARKDOWN
             )
-            log_message("✅ Видео отправлено (send_document)")
+        log_message(f"✅ Файл отправлен: {file_size_mb:.1f} МБ")
     except Exception as e:
         log_message(f"❌ Ошибка отправки: {e}", "ERROR")
         raise
@@ -410,112 +431,97 @@ def get_quality_keyboard(url: str):
         [InlineKeyboardButton(text="🎬 480p", callback_data=f"vid_480p_{url}"),
          InlineKeyboardButton(text="🎬 720p", callback_data=f"vid_720p_{url}"),
          InlineKeyboardButton(text="🎬 1080p", callback_data=f"vid_1080p_{url}")],
-        [InlineKeyboardButton(text="🏆 Best Quality", callback_data=f"vid_best_{url}"),
-         InlineKeyboardButton(text="🎵 Аудио (MP3)", callback_data=f"audio_{url}")],
+        [InlineKeyboardButton(text="🏆 Best", callback_data=f"vid_best_{url}"),
+         InlineKeyboardButton(text="🎵 MP3", callback_data=f"audio_{url}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
     return keyboard
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+# ==================== КОМАНДЫ ====================
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
-    log_message(f"Пользователь {message.from_user.id} запустил бота")
+    log_message(f"Пользователь {message.from_user.id}: /start")
     await message.answer(
         "🎬 *Видео-Бот*\n\n"
-        "Отправьте мне ссылку на видео.\n\n"
-        "📋 /log — Показать последние логи\n"
+        "Отправьте ссылку на видео.\n\n"
+        "🔧 /check — Проверить FFmpeg\n"
         "🗑️ /clear_cache — Очистить кэш\n"
         "📊 /stats — Статистика\n"
-        "🔧 /check_ffmpeg — Проверить FFmpeg",
+        "📋 /log — Логи",
         parse_mode=ParseMode.MARKDOWN
     )
 
-@dp.message(Command("log"))
-async def log_command(message: types.Message):
-    """Отправка логов пользователю"""
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            last_lines = lines[-30:]  # Последние 30 строк
-            log_text = "".join(last_lines)
-            await message.answer(f"📋 *Последние логи:*\n```\n{log_text[:3000]}\n```", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.answer("Лог-файл не найден.")
-
-@dp.message(Command("check_ffmpeg"))
-async def check_ffmpeg_command(message: types.Message):
-    """Проверка FFmpeg"""
+@dp.message(Command("check"))
+async def check_command(message: types.Message):
+    await message.answer("🔍 Проверяю FFmpeg...")
     if check_ffmpeg():
         await message.answer("✅ FFmpeg установлен и работает!")
     else:
-        await message.answer("❌ FFmpeg НЕ установлен. Бот пытается установить автоматически...")
+        await message.answer("⚠️ FFmpeg не найден, устанавливаю...")
         success = auto_install_ffmpeg()
         if success:
             await message.answer("✅ FFmpeg успешно установлен!")
         else:
-            await message.answer("❌ Не удалось установить FFmpeg автоматически. Установите вручную.")
+            await message.answer("❌ Не удалось установить FFmpeg. Смотри /log")
+
+@dp.message(Command("log"))
+async def log_command(message: types.Message):
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            last_lines = lines[-30:]
+            await message.answer(f"📋 *Логи:*\n```\n{''.join(last_lines)[:3000]}\n```", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await message.answer("Лог-файл не найден.")
 
 @dp.message(Command("clear_cache"))
 async def clear_cache_command(message: types.Message):
     global video_cache
-    deleted_count = 0
-    
-    for video_id, info in video_cache.items():
+    deleted = 0
+    for info in video_cache.values():
         if os.path.exists(info['path']):
             try:
                 os.remove(info['path'])
-                deleted_count += 1
+                deleted += 1
             except:
                 pass
-    
     video_cache = {}
     save_cache(video_cache)
-    
-    log_message(f"Кэш очищен, удалено {deleted_count} файлов")
-    await message.answer(f"🗑️ *Кэш очищен!*\nУдалено файлов: {deleted_count}", parse_mode=ParseMode.MARKDOWN)
+    await message.answer(f"🗑️ Очищено {deleted} файлов")
 
 @dp.message(Command("stats"))
 async def stats_command(message: types.Message):
     total_size = 0
-    for video_id, info in video_cache.items():
+    for info in video_cache.values():
         if os.path.exists(info['path']):
             total_size += os.path.getsize(info['path'])
-    
-    size_mb = total_size / (1024 * 1024)
-    
     await message.answer(
         f"📊 *Статистика*\n\n"
         f"📁 В кэше: {len(video_cache)}\n"
-        f"💾 Занято: {size_mb:.1f} МБ\n"
+        f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
         f"⚡ FFmpeg: {'✅' if check_ffmpeg() else '❌'}",
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ==================== ОБРАБОТЧИК ССЫЛОК ====================
+# ==================== ОБРАБОТЧИКИ ====================
 @dp.message()
 async def handle_url(message: types.Message):
     url = message.text.strip()
-    log_message(f"Получено сообщение от {message.from_user.id}: {url[:100]}")
+    log_message(f"Ссылка от {message.from_user.id}: {url[:100]}")
     
     if not (url.startswith("http://") or url.startswith("https://")):
-        await message.answer("❌ Отправьте *ссылку* на видео.", parse_mode=ParseMode.MARKDOWN)
+        await message.answer("❌ Отправьте ссылку (http:// или https://)")
         return
     
-    keyboard = get_quality_keyboard(url)
-    await message.answer(
-        "🎥 *Выберите опцию:*",
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await message.answer("🎥 *Выберите качество:*", reply_markup=get_quality_keyboard(url), parse_mode=ParseMode.MARKDOWN)
 
-# ==================== ОБРАБОТЧИК КНОПОК ====================
 @dp.callback_query()
 async def handle_callback(callback: CallbackQuery):
     data = callback.data
-    log_message(f"Callback от {callback.from_user.id}: {data[:100]}")
+    log_message(f"Callback: {data[:100]}")
     
     if data == "cancel":
-        await callback.message.edit_text("❌ Отменено.")
+        await callback.message.edit_text("❌ Отменено")
         await callback.answer()
         return
     
@@ -531,24 +537,19 @@ async def handle_callback(callback: CallbackQuery):
         url = parts[2]
         quality_name = QUALITY_NAMES.get(quality, quality)
         
-        await callback.message.edit_text(
-            f"⏳ Скачиваю *{quality_name}*...\nЛоги в /log",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await callback.message.edit_text(f"⏳ Скачиваю *{quality_name}*...\nЛоги в /log", parse_mode=ParseMode.MARKDOWN)
         
         loop = asyncio.get_event_loop()
         file_path, title, from_cache = await loop.run_in_executor(None, download_video_sync, url, quality)
         
-        if not file_path or not os.path.exists(file_path):
-            error_msg = "❌ Не удалось скачать видео.\n\nПроверьте /log для деталей."
-            await callback.message.edit_text(error_msg)
-            await send_log_to_admin(f"Ошибка скачивания: {url}\n{quality}")
+        if not file_path:
+            await callback.message.edit_text("❌ Ошибка скачивания.\nСмотри /log")
             await callback.answer()
             return
         
         await send_file_auto(callback.message.chat.id, file_path, title, quality_name, from_cache)
         await callback.message.delete()
-        await callback.answer("✅ Готово!" if not from_cache else "⚡ Из кэша!")
+        await callback.answer("✅ Готово!")
         
     elif action == "audio":
         url = parts[1]
@@ -558,17 +559,17 @@ async def handle_callback(callback: CallbackQuery):
         loop = asyncio.get_event_loop()
         file_path, title, from_cache = await loop.run_in_executor(None, download_audio_sync, url)
         
-        if not file_path or not os.path.exists(file_path):
-            await callback.message.edit_text("❌ Не удалось скачать аудио.\nПроверьте /log")
+        if not file_path:
+            await callback.message.edit_text("❌ Ошибка скачивания аудио")
             await callback.answer()
             return
         
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        file_size = os.path.getsize(file_path) / (1024 * 1024)
         audio_file = FSInputFile(file_path)
         await bot.send_audio(
             chat_id=callback.message.chat.id,
             audio=audio_file,
-            caption=f"✅ *{title[:100]}*\n🎵 MP3 | {file_size_mb:.1f} МБ" + (" ⚡(кэш)" if from_cache else ""),
+            caption=f"✅ *{title[:100]}*\n🎵 MP3 | {file_size:.1f} МБ" + (" ⚡(кэш)" if from_cache else ""),
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -580,17 +581,19 @@ async def main():
     print("=" * 60)
     print("🤖 БОТ ЗАПУЩЕН")
     print("=" * 60)
-    print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
-    print(f"📄 Файл логов: {LOG_FILE}")
-    print(f"💾 Кэш: {len(video_cache)} записей")
+    print(f"📁 Папка: {os.path.abspath(DOWNLOAD_DIR)}")
+    print(f"📄 Логи: {LOG_FILE}")
     print("-" * 60)
     
-    # Проверяем FFmpeg
+    # Автоустановка FFmpeg
     if not check_ffmpeg():
-        print("⚠️ FFmpeg не найден, пытаюсь установить...")
+        print("⚠️ FFmpeg не найден, устанавливаю...")
         auto_install_ffmpeg()
+    else:
+        print("✅ FFmpeg уже установлен")
     
-    print("✅ Бот готов к работе!")
+    print("=" * 60)
+    print("✅ Бот готов!")
     print("=" * 60)
     
     await dp.start_polling(bot)
