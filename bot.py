@@ -9,7 +9,7 @@ from aiogram.enums import ParseMode
 from yt_dlp import YoutubeDL
 
 # ==================== КОНФИГУРАЦИЯ ====================
-# 👇 ВСТАВЬТЕ ВАШ НОВЫЙ ТОКЕН СЮДА (ПОСЛЕ ОТЗЫВА СТАРОГО!)
+# 👇 ВСТАВЬТЕ ВАШ НОВЫЙ ТОКЕН СЮДА
 BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
 # Папка для временного хранения файлов
@@ -17,23 +17,29 @@ DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-# Словарь для временного хранения ссылок пользователей (пока они выбирают качество)
-user_urls = {}
+# Хранилище выбора пользователя (в реальном проекте лучше использовать БД)
+user_choices = {}
 
-# Доступные форматы для скачивания
+# Базовые настройки для yt-dlp
+BASE_YDL_OPTS = {
+    'outtmpl': f'{DOWNLOAD_DIR}/%(title)s.%(ext)s',
+    'quiet': True,
+    'no_warnings': True,
+}
+
+# Доступные форматы
 FORMATS = {
-    'video_2160p': {'name': '🎬 4K (2160p)', 'format': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]', 'type': 'video'},
-    'video_1080p': {'name': '🎬 Full HD (1080p)', 'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]', 'type': 'video'},
-    'video_720p': {'name': '🎬 HD (720p)', 'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]', 'type': 'video'},
-    'video_480p': {'name': '🎬 SD (480p)', 'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]', 'type': 'video'},
-    'video_360p': {'name': '🎬 Низкое (360p)', 'format': 'bestvideo[height<=360]+bestaudio/best[height<=360]', 'type': 'video'},
-    'audio_mp3': {'name': '🎵 Аудио (MP3)', 'format': 'bestaudio/best', 'type': 'audio', 'extract_audio': True},
-    'audio_m4a': {'name': '🎵 Аудио (M4A)', 'format': 'bestaudio/best', 'type': 'audio', 'extract_audio': True},
+    '2160p': {'format': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]', 'merge': 'mp4', 'name': '4K (2160p)'},
+    '1440p': {'format': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]', 'merge': 'mp4', 'name': '2K (1440p)'},
+    '1080p': {'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]', 'merge': 'mp4', 'name': 'Full HD (1080p)'},
+    '720p':  {'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]', 'merge': 'mp4', 'name': 'HD (720p)'},
+    '480p':  {'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]', 'merge': 'mp4', 'name': 'SD (480p)'},
+    '360p':  {'format': 'bestvideo[height<=360]+bestaudio/best[height<=360]', 'merge': 'mp4', 'name': '360p'},
+    'audio': {'format': 'bestaudio/best', 'merge': None, 'name': '🎵 Аудио (MP3)', 'extract_audio': True}
 }
 
 # ==================== АВТОУСТАНОВКА FFMPEG ====================
 def auto_install_ffmpeg():
-    """Автоматическая установка FFmpeg при первом запуске"""
     try:
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
         if result.returncode == 0:
@@ -57,45 +63,48 @@ def auto_install_ffmpeg():
 # ==================== ФУНКЦИЯ СКАЧИВАНИЯ ====================
 def download_media_sync(url: str, format_key: str):
     """Скачивает видео или аудио в зависимости от выбранного формата"""
-    format_info = FORMATS.get(format_key, FORMATS['video_720p'])
-    
-    # Базовые настройки
-    opts = {
-        'outtmpl': f'{DOWNLOAD_DIR}/%(title)s.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-    }
-    
-    # Настройки для видео
-    if format_info['type'] == 'video':
-        opts['format'] = format_info['format']
-        opts['merge_output_format'] = 'mp4'
-    # Настройки для аудио
-    else:
-        opts['format'] = format_info['format']
-        opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3' if format_key == 'audio_mp3' else 'm4a',
-            'preferredquality': '192',
-        }]
-    
     try:
+        format_config = FORMATS[format_key]
+        
+        # Настраиваем параметры
+        opts = BASE_YDL_OPTS.copy()
+        opts['format'] = format_config['format']
+        
+        if format_config['merge']:
+            opts['merge_output_format'] = format_config['merge']
+        
+        if format_key == 'audio':
+            opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+            opts['outtmpl'] = f'{DOWNLOAD_DIR}/%(title)s.%(ext)s'
+        
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'media')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
-            # Получаем путь к скачанному файлу
-            filename = ydl.prepare_filename(info)
+            # Определяем путь к файлу
+            if format_key == 'audio':
+                filename = f"{DOWNLOAD_DIR}/{title}.mp3"
+                if not os.path.exists(filename):
+                    # Ищем любой mp3 файл
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        if f.endswith('.mp3') and title in f:
+                            filename = os.path.join(DOWNLOAD_DIR, f)
+                            break
+            else:
+                filename = ydl.prepare_filename(info)
+                if not os.path.exists(filename):
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        if f.endswith('.mp4') and title in f:
+                            filename = os.path.join(DOWNLOAD_DIR, f)
+                            break
             
-            # Для аудио меняем расширение
-            if format_info['type'] == 'audio':
-                ext = 'mp3' if format_key == 'audio_mp3' else 'm4a'
-                filename = filename.rsplit('.', 1)[0] + f'.{ext}'
-            
-            # Проверяем существование файла
             if not os.path.exists(filename):
-                # Ищем любой недавний файл в папке
+                # Берем самый свежий файл
                 files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) 
                         if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))]
                 if files:
@@ -109,25 +118,17 @@ def download_media_sync(url: str, format_key: str):
         print(f"Ошибка в yt-dlp: {e}")
         return None, None
 
-# ==================== КЛАВИАТУРА ДЛЯ ВЫБОРА КАЧЕСТВА ====================
-def get_quality_keyboard():
-    """Создает клавиатуру с кнопками выбора качества"""
+# ==================== КЛАВИАТУРЫ ====================
+def get_quality_keyboard(url: str):
+    """Создает клавиатуру с выбором качества"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text=FORMATS['video_2160p']['name'], callback_data="format_video_2160p"),
-            InlineKeyboardButton(text=FORMATS['video_1080p']['name'], callback_data="format_video_1080p"),
-        ],
-        [
-            InlineKeyboardButton(text=FORMATS['video_720p']['name'], callback_data="format_video_720p"),
-            InlineKeyboardButton(text=FORMATS['video_480p']['name'], callback_data="format_video_480p"),
-        ],
-        [
-            InlineKeyboardButton(text=FORMATS['video_360p']['name'], callback_data="format_video_360p"),
-            InlineKeyboardButton(text=FORMATS['audio_mp3']['name'], callback_data="format_audio_mp3"),
-        ],
-        [
-            InlineKeyboardButton(text=FORMATS['audio_m4a']['name'], callback_data="format_audio_m4a"),
-        ],
+        [InlineKeyboardButton(text="🎬 4K (2160p)", callback_data=f"quality_2160p|{url}")],
+        [InlineKeyboardButton(text="🎬 2K (1440p)", callback_data=f"quality_1440p|{url}")],
+        [InlineKeyboardButton(text="🎬 Full HD (1080p)", callback_data=f"quality_1080p|{url}")],
+        [InlineKeyboardButton(text="🎬 HD (720p)", callback_data=f"quality_720p|{url}")],
+        [InlineKeyboardButton(text="🎬 SD (480p)", callback_data=f"quality_480p|{url}")],
+        [InlineKeyboardButton(text="🎬 360p", callback_data=f"quality_360p|{url}")],
+        [InlineKeyboardButton(text="🎵 Аудио (MP3)", callback_data=f"quality_audio|{url}")],
     ])
     return keyboard
 
@@ -139,33 +140,39 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
-        "🎬 *Видео-Бот*\n\n"
-        "Отправьте мне ссылку на видео, а затем выберите:\n"
-        "• Качество видео (4K, 1080p, 720p, 480p, 360p)\n"
-        "• Аудио (MP3 или M4A)\n\n"
-        "⚠️ *Важно:* Telegram не позволяет отправлять файлы больше **2 ГБ**. "
-        "Видео в 4K могут весить очень много и не отправятся.\n\n"
-        "📖 /help — Помощь",
+        "🎬 *Видео-Бот с выбором качества*\n\n"
+        "📌 *Как пользоваться:*\n"
+        "1. Отправьте мне ссылку на видео\n"
+        "2. Выберите нужное качество или аудио\n"
+        "3. Получите файл!\n\n"
+        "✨ *Особенности:*\n"
+        "• Поддержка 4K, 2K, 1080p, 720p и ниже\n"
+        "• Конвертация в MP3\n"
+        "• Автоматическая установка FFmpeg\n\n"
+        "📖 /help — Подробная справка",
         parse_mode=ParseMode.MARKDOWN
     )
 
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
     await message.answer(
-        "📖 *Как пользоваться:*\n\n"
-        "1️⃣ Найдите видео на любом сайте\n"
-        "2️⃣ Скопируйте ссылку\n"
-        "3️⃣ Отправьте ссылку боту\n"
-        "4️⃣ Выберите качество или аудио\n"
-        "5️⃣ Дождитесь скачивания и отправки\n\n"
-        "🎯 *Доступные форматы:*\n"
-        "• 4K (2160p) — очень тяжелые файлы\n"
-        "• 1080p — Full HD\n"
-        "• 720p — HD (рекомендуется)\n"
-        "• 480p — хорошее качество\n"
-        "• 360p — экономия трафика\n"
-        "• MP3 / M4A — только звук\n\n"
-        "⚠️ *Лимит Telegram:* 2 ГБ на файл",
+        "📖 *Подробная инструкция*\n\n"
+        "1️⃣ *Отправьте ссылку*\n"
+        "Скопируйте ссылку на видео из браузера и отправьте боту\n\n"
+        "2️⃣ *Выберите формат*\n"
+        "Бот покажет кнопки с разными качествами:\n"
+        "• 4K/2K/1080p — для больших экранов\n"
+        "• 720p/480p — оптимальный размер\n"
+        "• Аудио — только звук в MP3\n\n"
+        "3️⃣ *Получите файл*\n"
+        "Бот скачает и отправит файл\n\n"
+        "⚠️ *Ограничения:*\n"
+        "• Telegram НЕ позволяет отправлять файлы >50 МБ\n"
+        "• Для 4K/2K видео могут превышать лимит\n"
+        "• В этом случае выберите качество ниже\n\n"
+        "🔧 *Команды:*\n"
+        "/start — Главное меню\n"
+        "/help — Эта справка",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -182,129 +189,121 @@ async def handle_url(message: types.Message):
         )
         return
     
-    # Сохраняем ссылку пользователя
-    user_urls[message.from_user.id] = url
-    
     # Показываем клавиатуру с выбором качества
     await message.answer(
-        "🎯 *Выберите формат скачивания:*\n\n"
-        "Видео в 4K могут весить более 2 ГБ и не отправятся в Telegram.\n"
-        "Рекомендую 720p или 1080p для хорошего соотношения качества и размера.",
-        reply_markup=get_quality_keyboard(),
+        "📥 *Ссылка получена!*\n\n"
+        "Выберите качество или аудио формат:",
+        reply_markup=get_quality_keyboard(url),
         parse_mode=ParseMode.MARKDOWN
     )
 
 # ==================== ОБРАБОТЧИК ВЫБОРА КАЧЕСТВА ====================
-@dp.callback_query(lambda c: c.data.startswith('format_'))
-async def process_format_selection(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    format_key = callback_query.data.replace('format_', '')
-    
-    # Проверяем, есть ли ссылка от этого пользователя
-    if user_id not in user_urls:
-        await callback_query.message.edit_text(
-            "❌ Ссылка не найдена. Пожалуйста, отправьте ссылку заново."
-        )
-        await callback_query.answer()
+@dp.callback_query()
+async def handle_quality_selection(callback: CallbackQuery):
+    if not callback.data.startswith("quality_"):
         return
     
-    url = user_urls[user_id]
-    format_info = FORMATS.get(format_key, FORMATS['video_720p'])
+    # Разбираем данные
+    _, format_key, url = callback.data.split("|", 2)
     
-    # Отвечаем на callback, чтобы убрать часики
-    await callback_query.answer()
+    # Отвечаем на callback, чтобы убрать "часики"
+    await callback.answer(f"Выбран формат: {FORMATS[format_key]['name']}")
     
-    # Обновляем сообщение, показывая, что началась загрузка
-    await callback_query.message.edit_text(
-        f"⏳ Начинаю скачивание...\n\n"
-        f"📎 Формат: {format_info['name']}\n"
-        f"🔗 Ссылка: {url[:50]}...\n\n"
-        f"Это может занять некоторое время в зависимости от размера файла."
+    # Редактируем сообщение, показываем статус
+    await callback.message.edit_text(
+        f"🔄 *Выбран:* {FORMATS[format_key]['name']}\n\n"
+        f"⏳ Начинаю загрузку...\n"
+        f"📍 URL: {url[:50]}...\n\n"
+        f"_Это может занять некоторое время..._",
+        parse_mode=ParseMode.MARKDOWN
     )
     
     try:
-        # Скачиваем в отдельном потоке
+        # Скачиваем файл в отдельном потоке
         loop = asyncio.get_event_loop()
         file_path, title = await loop.run_in_executor(None, download_media_sync, url, format_key)
         
         if not file_path or not os.path.exists(file_path):
-            await callback_query.message.edit_text(
-                "❌ Не удалось скачать файл.\n\n"
+            await callback.message.edit_text(
+                "❌ *Не удалось скачать файл*\n\n"
                 "Возможные причины:\n"
                 "• Ссылка недействительна\n"
-                "• Видео удалено или закрыто\n"
-                "• Выбранный формат недоступен\n\n"
-                "Попробуйте другой формат или ссылку."
+                "• Выбранное качество недоступно\n"
+                "• Видео требует авторизации\n\n"
+                "Попробуйте другой формат или видео.",
+                parse_mode=ParseMode.MARKDOWN
             )
-            # Удаляем сохраненную ссылку
-            del user_urls[user_id]
             return
         
-        # Проверяем размер файла (лимит Telegram 2 ГБ = 2048 МБ)
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        file_size_gb = file_size_mb / 1024
+        # Проверяем размер файла
+        file_size = os.path.getsize(file_path) / (1024 * 1024)
         
-        if file_size_mb > 2048:  # 2 ГБ лимит
+        if file_size > 50:
             os.remove(file_path)
-            await callback_query.message.edit_text(
-                f"❌ Файл слишком большой ({file_size_gb:.2f} ГБ).\n"
-                f"Telegram позволяет отправлять файлы не более **2 ГБ**.\n\n"
-                f"Попробуйте выбрать более низкое качество или аудио."
+            await callback.message.edit_text(
+                f"⚠️ *Файл слишком большой!*\n\n"
+                f"Размер: {file_size:.1f} МБ\n"
+                f"Лимит Telegram: 50 МБ\n\n"
+                f"Попробуйте выбрать качество ниже или аудио формат.",
+                parse_mode=ParseMode.MARKDOWN
             )
-            del user_urls[user_id]
             return
         
         # Обновляем статус
-        size_text = f"{file_size_gb:.2f} ГБ" if file_size_mb > 1024 else f"{file_size_mb:.1f} МБ"
-        await callback_query.message.edit_text(
-            f"📥 Скачивание завершено!\n\n"
-            f"🎬 Название: {title[:50]}\n"
-            f"📦 Размер: {size_text}\n"
-            f"📎 Формат: {format_info['name']}\n\n"
-            f"📤 Отправляю файл в Telegram..."
+        await callback.message.edit_text(
+            f"✅ *Загрузка завершена!*\n\n"
+            f"📹 Название: {title[:60]}\n"
+            f"📊 Размер: {file_size:.1f} МБ\n"
+            f"🎬 Формат: {FORMATS[format_key]['name']}\n\n"
+            f"📤 Отправляю файл...",
+            parse_mode=ParseMode.MARKDOWN
         )
         
         # Отправляем файл
         media_file = FSInputFile(file_path)
         
-        if format_info['type'] == 'video':
-            await bot.send_video(
-                chat_id=callback_query.message.chat.id,
-                video=media_file,
-                caption=f"✅ *{title[:100]}*\n\n📎 {format_info['name']}\n📦 {size_text}",
-                supports_streaming=True,
+        if format_key == 'audio':
+            await bot.send_audio(
+                chat_id=callback.message.chat.id,
+                audio=media_file,
+                caption=f"🎵 *{title[:100]}*",
                 parse_mode=ParseMode.MARKDOWN
             )
         else:
-            # Для аудио используем send_audio
-            await bot.send_audio(
-                chat_id=callback_query.message.chat.id,
-                audio=media_file,
-                caption=f"✅ *{title[:100]}*\n\n📎 {format_info['name']}\n📦 {size_text}",
+            await bot.send_video(
+                chat_id=callback.message.chat.id,
+                video=media_file,
+                caption=f"🎬 *{title[:100]}*\n🎚️ {FORMATS[format_key]['name']}",
+                supports_streaming=True,
                 parse_mode=ParseMode.MARKDOWN
             )
         
-        # Удаляем временный файл и ссылку пользователя
+        # Удаляем временный файл
         os.remove(file_path)
-        del user_urls[user_id]
         
-        # Удаляем сообщение со статусом
-        await callback_query.message.delete()
+        # Финальное сообщение
+        await callback.message.edit_text(
+            f"✅ *Готово!*\n\n"
+            f"Видео успешно отправлено!\n"
+            f"📹 {FORMATS[format_key]['name']}\n\n"
+            f"🔗 [Открыть в Telegram](https://t.me/{callback.from_user.username})",
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True
+        )
         
     except Exception as e:
         print(f"Ошибка: {e}")
-        await callback_query.message.edit_text(
-            f"⚠️ Произошла ошибка:\n`{str(e)[:200]}`\n\n"
-            f"Попробуйте другой формат или ссылку.",
+        await callback.message.edit_text(
+            f"⚠️ *Произошла ошибка*\n\n"
+            f"```\n{str(e)[:200]}\n```\n\n"
+            f"Попробуйте другой формат или повторите позже.",
             parse_mode=ParseMode.MARKDOWN
         )
-        if user_id in user_urls:
-            del user_urls[user_id]
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
     print("=" * 50)
-    print("🤖 Запуск бота...")
+    print("🤖 Бот с выбором качества запускается...")
     print("=" * 50)
     
     # Автоматическая установка FFmpeg
@@ -312,8 +311,11 @@ async def main():
         print("⚠️ Продолжаем без FFmpeg, но некоторые функции могут не работать")
     
     print(f"📁 Папка для загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
+    print("✅ Доступные форматы:")
+    for key, fmt in FORMATS.items():
+        print(f"   • {fmt['name']}")
+    print("=" * 50)
     print("✅ Бот готов к работе!")
-    print("🎯 Доступные форматы: 4K, 1080p, 720p, 480p, 360p, MP3, M4A")
     print("📨 Отправьте боту ссылку на видео...")
     print("=" * 50)
     
