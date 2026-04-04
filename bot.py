@@ -157,7 +157,7 @@ async def handle_url(message: types.Message):
             return
         
         file_size = os.path.getsize(file_path) / (1024 * 1024)
-        if file_size > 50:
+        if file_size > 500:
             os.remove(file_path)
             await status_msg.edit_text(
                 f"❌ Видео слишком большое ({file_size:.1f} МБ).\n"
