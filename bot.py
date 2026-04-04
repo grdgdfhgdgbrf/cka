@@ -10,7 +10,7 @@ from yt_dlp import YoutubeDL
 
 # ==================== КОНФИГУРАЦИЯ ====================
 # 👇 ВСТАВЬТЕ ВАШ НОВЫЙ ТОКЕН СЮДА (ПОСЛЕ ОТЗЫВА СТАРОГО!)
-BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI одним кодом м полностью "
+BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
 # Папка для временного хранения файлов
 DOWNLOAD_DIR = "downloads"
