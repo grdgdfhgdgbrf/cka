@@ -17,9 +17,9 @@ from aiogram.enums import ParseMode
 from yt_dlp import YoutubeDL
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "ВАШ_ТОКЕН_СЮДА"
+BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
-DOWNLOAD_DIR =7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI "downloads"
+DOWNLOAD_DIR = "downloads"
 COMPRESSED_DIR = "compressed"
 CACHE_FILE = "video_cache.json"
 LOG_FILE = "bot_log.txt"
