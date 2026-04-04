@@ -7,6 +7,7 @@ import hashlib
 import traceback
 import shutil
 import urllib.request
+import zipfile
 import platform
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
@@ -22,8 +23,9 @@ DOWNLOAD_DIR = "downloads"
 COMPRESSED_DIR = "compressed"
 CACHE_FILE = "video_cache.json"
 LOG_FILE = "bot_log.txt"
+TOOLS_DIR = "tools"
 
-for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR]:
+for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
@@ -57,53 +59,70 @@ def save_cache(cache):
 video_cache = load_cache()
 log_message(f"Загружено {len(video_cache)} записей")
 
-# ==================== УСТАНОВКА ДЛЯ LINUX ====================
+# ==================== АВТОМАТИЧЕСКАЯ УСТАНОВКА FFMPEG ДЛЯ WINDOWS ====================
 def check_ffmpeg() -> bool:
     """Проверка наличия FFmpeg"""
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=5)
+        # Проверяем в tools папке
+        if platform.system() == "Windows":
+            ffmpeg_path = os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffmpeg.exe")
+        else:
+            ffmpeg_path = os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffmpeg")
+        
+        if os.path.exists(ffmpeg_path):
+            log_message(f"✅ FFmpeg найден: {ffmpeg_path}")
+            return True
+        
+        # Проверяем в PATH
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            log_message("✅ FFmpeg найден")
+            log_message("✅ FFmpeg найден в PATH")
             return True
     except:
         pass
+    
     log_message("❌ FFmpeg не найден")
     return False
 
-def check_nodejs() -> bool:
-    """Проверка наличия Node.js"""
+def install_ffmpeg_windows():
+    """Установка FFmpeg на Windows"""
     try:
-        result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            log_message(f"✅ Node.js найден: {result.stdout.strip()}")
-            return True
-    except:
-        pass
-    log_message("❌ Node.js не найден")
-    return False
-
-def install_ffmpeg_linux():
-    """Установка FFmpeg на Linux"""
-    try:
-        log_message("🚀 Установка FFmpeg для Linux...")
+        log_message("🚀 Установка FFmpeg на Windows...")
         
-        # Определяем дистрибутив
-        if os.path.exists('/etc/debian_version'):
-            # Debian/Ubuntu
-            log_message("📦 Обнаружен Debian/Ubuntu, устанавливаю через apt...")
-            subprocess.run(['sudo', 'apt', 'update'], check=True, capture_output=True)
-            subprocess.run(['sudo', 'apt', 'install', '-y', 'ffmpeg'], check=True, capture_output=True)
-        elif os.path.exists('/etc/redhat-release'):
-            # Red Hat/CentOS/Fedora
-            log_message("📦 Обнаружен Red Hat/Fedora, устанавливаю через dnf...")
-            subprocess.run(['sudo', 'dnf', 'install', '-y', 'ffmpeg'], check=True, capture_output=True)
-        elif os.path.exists('/etc/arch-release'):
-            # Arch Linux
-            log_message("📦 Обнаружен Arch Linux, устанавливаю через pacman...")
-            subprocess.run(['sudo', 'pacman', '-S', '--noconfirm', 'ffmpeg'], check=True, capture_output=True)
-        else:
-            log_message("⚠️ Не удалось определить дистрибутив", "WARNING")
-            return False
+        ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        zip_path = os.path.join(TOOLS_DIR, "ffmpeg.zip")
+        extract_path = os.path.join(TOOLS_DIR, "ffmpeg_temp")
+        
+        log_message("📥 Скачивание FFmpeg...")
+        urllib.request.urlretrieve(ffmpeg_url, zip_path)
+        
+        log_message("📦 Распаковка FFmpeg...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
+        
+        # Находим папку bin
+        for item in os.listdir(extract_path):
+            if item.startswith("ffmpeg-") and os.path.isdir(os.path.join(extract_path, item)):
+                bin_path = os.path.join(extract_path, item, "bin")
+                target_path = os.path.join(TOOLS_DIR, "ffmpeg", "bin")
+                if os.path.exists(target_path):
+                    shutil.rmtree(target_path, ignore_errors=True)
+                os.makedirs(target_path, exist_ok=True)
+                
+                # Копируем файлы
+                for file in os.listdir(bin_path):
+                    src = os.path.join(bin_path, file)
+                    dst = os.path.join(target_path, file)
+                    shutil.copy2(src, dst)
+                break
+        
+        # Очистка
+        os.remove(zip_path)
+        shutil.rmtree(extract_path, ignore_errors=True)
+        
+        # Добавляем в PATH текущей сессии
+        ffmpeg_bin = os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin")
+        os.environ['PATH'] = ffmpeg_bin + os.pathsep + os.environ.get('PATH', '')
         
         log_message("✅ FFmpeg установлен успешно")
         return True
@@ -112,36 +131,76 @@ def install_ffmpeg_linux():
         log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
         return False
 
-def install_nodejs_linux():
-    """Установка Node.js на Linux"""
+def install_ffmpeg_linux():
+    """Установка FFmpeg на Linux"""
     try:
-        log_message("🚀 Установка Node.js для Linux...")
-        
-        # Определяем дистрибутив
-        if os.path.exists('/etc/debian_version'):
-            # Debian/Ubuntu
-            log_message("📦 Обнаружен Debian/Ubuntu, устанавливаю через NodeSource...")
-            
-            # Добавляем репозиторий NodeSource
-            node_setup = "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -"
-            subprocess.run(node_setup, shell=True, check=True, capture_output=True)
-            
-            # Устанавливаем Node.js
-            subprocess.run(['sudo', 'apt', 'install', '-y', 'nodejs'], check=True, capture_output=True)
-            
-        elif os.path.exists('/etc/redhat-release'):
-            # Red Hat/CentOS/Fedora
-            log_message("📦 Обнаружен Red Hat/Fedora, устанавливаю через dnf...")
-            subprocess.run(['sudo', 'dnf', 'module', 'enable', 'nodejs:20', '-y'], check=True, capture_output=True)
-            subprocess.run(['sudo', 'dnf', 'install', '-y', 'nodejs'], check=True, capture_output=True)
-            
-        elif os.path.exists('/etc/arch-release'):
-            # Arch Linux
-            log_message("📦 Обнаружен Arch Linux, устанавливаю через pacman...")
-            subprocess.run(['sudo', 'pacman', '-S', '--noconfirm', 'nodejs', 'npm'], check=True, capture_output=True)
+        log_message("🚀 Установка FFmpeg на Linux...")
+        subprocess.run(['apt', 'update'], capture_output=True)
+        subprocess.run(['apt', 'install', '-y', 'ffmpeg'], capture_output=True)
+        log_message("✅ FFmpeg установлен успешно")
+        return True
+    except Exception as e:
+        log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
+        return False
+
+# ==================== АВТОМАТИЧЕСКАЯ УСТАНОВКА NODE.JS ====================
+def check_nodejs() -> bool:
+    """Проверка наличия Node.js"""
+    try:
+        # Проверяем в tools папке
+        if platform.system() == "Windows":
+            node_path = os.path.join(os.getcwd(), TOOLS_DIR, "nodejs", "node.exe")
         else:
-            log_message("⚠️ Не удалось определить дистрибутив", "WARNING")
-            return False
+            node_path = os.path.join(os.getcwd(), TOOLS_DIR, "nodejs", "bin", "node")
+        
+        if os.path.exists(node_path):
+            log_message(f"✅ Node.js найден: {node_path}")
+            return True
+        
+        # Проверяем в PATH
+        result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            log_message(f"✅ Node.js найден: {result.stdout.strip()}")
+            return True
+    except:
+        pass
+    
+    log_message("❌ Node.js не найден")
+    return False
+
+def install_nodejs_windows():
+    """Установка Node.js на Windows"""
+    try:
+        log_message("🚀 Установка Node.js на Windows...")
+        
+        node_url = "https://nodejs.org/dist/v20.11.0/node-v20.11.0-win-x64.zip"
+        zip_path = os.path.join(TOOLS_DIR, "nodejs.zip")
+        extract_path = os.path.join(TOOLS_DIR, "nodejs_temp")
+        
+        log_message("📥 Скачивание Node.js...")
+        urllib.request.urlretrieve(node_url, zip_path)
+        
+        log_message("📦 Распаковка Node.js...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
+        
+        # Находим папку
+        for item in os.listdir(extract_path):
+            if item.startswith("node-v") and os.path.isdir(os.path.join(extract_path, item)):
+                source_path = os.path.join(extract_path, item)
+                target_path = os.path.join(TOOLS_DIR, "nodejs")
+                if os.path.exists(target_path):
+                    shutil.rmtree(target_path, ignore_errors=True)
+                shutil.copytree(source_path, target_path)
+                break
+        
+        # Очистка
+        os.remove(zip_path)
+        shutil.rmtree(extract_path, ignore_errors=True)
+        
+        # Добавляем в PATH
+        node_path = os.path.join(os.getcwd(), TOOLS_DIR, "nodejs")
+        os.environ['PATH'] = node_path + os.pathsep + os.environ.get('PATH', '')
         
         log_message("✅ Node.js установлен успешно")
         return True
@@ -156,19 +215,27 @@ def auto_install_all():
     log_message("🔧 ПРОВЕРКА И УСТАНОВКА ЗАВИСИМОСТЕЙ")
     log_message("=" * 50)
     
+    system = platform.system()
+    log_message(f"🖥️ Операционная система: {system}")
+    
     # Установка FFmpeg
     if not check_ffmpeg():
         log_message("⚠️ Устанавливаю FFmpeg...")
-        install_ffmpeg_linux()
+        if system == "Windows":
+            install_ffmpeg_windows()
+        elif system == "Linux":
+            install_ffmpeg_linux()
+        else:
+            log_message("⚠️ Для macOS установите FFmpeg вручную: brew install ffmpeg", "WARNING")
     else:
         log_message("✅ FFmpeg уже установлен")
     
-    # Установка Node.js
-    if not check_nodejs():
+    # Установка Node.js (только для Windows, для Linux через apt)
+    if system == "Windows" and not check_nodejs():
         log_message("⚠️ Устанавливаю Node.js...")
-        install_nodejs_linux()
-    else:
-        log_message("✅ Node.js уже установлен")
+        install_nodejs_windows()
+    elif system == "Linux":
+        log_message("ℹ️ Node.js не требуется для Linux, yt-dlp работает без него")
     
     # Обновление yt-dlp
     try:
@@ -179,51 +246,55 @@ def auto_install_all():
         log_message(f"Ошибка обновления yt-dlp: {e}", "WARNING")
     
     log_message("=" * 50)
-    log_message("✅ ПРОВЕРКА ЗАВЕРШЕНА")
+    log_message("✅ ПРОВЕРКА ЗАВИСИМОСТЕЙ ЗАВЕРШЕНА")
     log_message("=" * 50)
 
 # ==================== СЖАТИЕ ВИДЕО ====================
 def compress_video(input_path: str, target_size_mb: int = 48) -> str:
     """Сжатие видео до указанного размера"""
     try:
-        # Проверяем наличие ffprobe
-        try:
-            subprocess.run(['ffprobe', '-version'], capture_output=True, check=True)
-        except:
-            log_message("❌ ffprobe не найден", "ERROR")
-            return None
+        # Находим ffmpeg
+        ffmpeg_path = "ffmpeg"
+        if platform.system() == "Windows":
+            local_ffmpeg = os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffmpeg.exe")
+            if os.path.exists(local_ffmpeg):
+                ffmpeg_path = local_ffmpeg
         
-        # Получаем длительность видео
-        probe_cmd = [
-            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1', input_path
-        ]
+        # Получаем длительность
+        probe_cmd = [ffmpeg_path, '-i', input_path]
+        result = subprocess.run(probe_cmd, capture_output=True, text=True)
         
-        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+        # Извлекаем длительность из stderr
+        duration = 60
+        for line in result.stderr.split('\n'):
+            if 'Duration' in line:
+                import re
+                match = re.search(r'Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})', line)
+                if match:
+                    hours = int(match.group(1))
+                    minutes = int(match.group(2))
+                    seconds = int(match.group(3))
+                    duration = hours * 3600 + minutes * 60 + seconds
+                break
         
-        if result.returncode != 0 or not result.stdout:
-            log_message(f"Ошибка получения длительности", "ERROR")
-            return None
-        
-        duration = float(result.stdout.strip())
         if duration <= 0:
             duration = 60
         
         # Рассчитываем битрейт
         target_bits = target_size_mb * 8 * 1024 * 1024
         video_bitrate = int(target_bits / duration)
-        video_bitrate = max(300000, min(video_bitrate, 3000000))  # 0.3 - 3 Mbps
+        video_bitrate = max(300000, min(video_bitrate, 2000000))  # 0.3 - 2 Mbps
         
         # Выходной файл
         base_name = os.path.basename(input_path)
         name_without_ext = os.path.splitext(base_name)[0]
         output_path = os.path.join(COMPRESSED_DIR, f"{name_without_ext}_compressed.mp4")
         
-        # Команда сжатия
+        # Сжатие
         compress_cmd = [
-            'ffmpeg', '-i', input_path,
+            ffmpeg_path, '-i', input_path,
             '-b:v', f'{video_bitrate}',
-            '-b:a', '128k',
+            '-b:a', '96k',
             '-c:v', 'libx264',
             '-c:a', 'aac',
             '-preset', 'fast',
@@ -231,7 +302,7 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
             '-y', output_path
         ]
         
-        log_message(f"Сжатие: битрейт {video_bitrate} bps, длительность {duration:.1f} сек")
+        log_message(f"Сжатие: битрейт {video_bitrate} bps, длительность {duration:.0f} сек")
         
         result = subprocess.run(compress_cmd, capture_output=True, text=True, timeout=300)
         
@@ -249,9 +320,10 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
 
 # ==================== СКАЧИВАНИЕ ВИДЕО ====================
 def download_video_sync(url: str, quality: str):
-    """Скачивание видео"""
+    """Скачивание видео с помощью yt-dlp"""
     video_id = hashlib.md5(f"{url}_{quality}".encode()).hexdigest()
     
+    # Проверка кэша
     if video_id in video_cache:
         cached = video_cache[video_id]
         if os.path.exists(cached['path']):
@@ -263,7 +335,7 @@ def download_video_sync(url: str, quality: str):
     try:
         # Настройки качества
         quality_map = {
-            "144p": 'worstvideo[height<=144]+worstaudio/best[height<=144]',
+            "144p": 'worst[height<=144]',
             "240p": 'best[height<=240]',
             "360p": 'best[height<=360]',
             "480p": 'best[height<=480]',
@@ -273,6 +345,7 @@ def download_video_sync(url: str, quality: str):
         }
         format_spec = quality_map.get(quality, 'best[height<=720]')
         
+        # Настройки yt-dlp
         opts = {
             'format': format_spec,
             'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
@@ -286,15 +359,15 @@ def download_video_sync(url: str, quality: str):
         }
         
         with YoutubeDL(opts) as ydl:
+            # Получаем информацию
             info = ydl.extract_info(url, download=True)
             
-            if not info:
-                log_message("❌ Не удалось получить информацию", "ERROR")
+            if info is None:
+                log_message("❌ Не удалось получить информацию о видео", "ERROR")
                 return None, None, False
             
-            # Получаем заголовок
             title = info.get('title', 'video')
-            if not title:
+            if title is None:
                 title = 'video'
             
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
@@ -310,7 +383,6 @@ def download_video_sync(url: str, quality: str):
                 mp4_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.mp4')]
                 if mp4_files:
                     filename = max(mp4_files, key=os.path.getmtime)
-                    log_message(f"Найден файл: {os.path.basename(filename)}")
                 else:
                     log_message("❌ Файл не найден", "ERROR")
                     return None, None, False
@@ -318,6 +390,7 @@ def download_video_sync(url: str, quality: str):
             file_size = os.path.getsize(filename) / (1024 * 1024)
             log_message(f"✅ Скачано: {title[:50]}... ({file_size:.1f} МБ)")
             
+            # Сохраняем в кэш
             video_cache[video_id] = {
                 'path': filename,
                 'title': title,
@@ -336,7 +409,7 @@ def download_video_sync(url: str, quality: str):
         return None, None, False
 
 def download_audio_sync(url: str):
-    """Скачивание аудио"""
+    """Скачивание аудио в MP3"""
     audio_id = hashlib.md5(f"{url}_audio".encode()).hexdigest()
     
     if audio_id in video_cache:
@@ -362,7 +435,14 @@ def download_audio_sync(url: str):
         
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            
+            if info is None:
+                return None, None, False
+            
             title = info.get('title', 'audio')
+            if title is None:
+                title = 'audio'
+            
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
             filename = None
@@ -443,16 +523,16 @@ async def send_video_with_compress(message, file_path: str, title: str, quality:
                 return True
             else:
                 await status_msg.edit_text(
-                    f"❌ *Не удалось сжать видео*\n"
+                    f"❌ *Не удалось сжать видео до 50 МБ*\n"
                     f"Получилось {new_size:.1f} МБ\n"
-                    f"Попробуйте качество ниже",
+                    f"Попробуйте выбрать качество ниже (720p или 480p)",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return False
         else:
             await status_msg.edit_text(
                 "❌ *Ошибка сжатия*\n"
-                "Попробуйте качество ниже (720p или 480p)",
+                "Попробуйте выбрать качество ниже (720p или 480p)",
                 parse_mode=ParseMode.MARKDOWN
             )
             return False
@@ -483,17 +563,17 @@ def get_keyboard(url: str):
 async def start_cmd(message: types.Message):
     await message.answer(
         "🎬 *Видео-Бот*\n\n"
-        "📹 Отправьте ссылку на видео с YouTube, TikTok, Instagram.\n\n"
+        "📹 Отправьте мне ссылку на видео с YouTube, TikTok, Instagram и других сайтов.\n\n"
         "*Особенности:*\n"
-        "• ✅ Автоустановка FFmpeg и Node.js\n"
-        "• 🗜️ Автосжатие видео до 50 МБ\n"
-        "• ⚡ Кэширование\n\n"
+        "• ✅ Автоматическая установка FFmpeg\n"
+        "• 🗜️ Автоматическое сжатие видео до 50 МБ\n"
+        "• ⚡ Кэширование - повторные видео мгновенно\n"
+        "• 🎵 Поддержка MP3 аудио\n\n"
         "*Команды:*\n"
         "/start - Главное меню\n"
         "/help - Помощь\n"
         "/stats - Статистика\n"
-        "/clear - Очистить кэш\n"
-        "/log - Логи",
+        "/clear - Очистить кэш",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -504,8 +584,9 @@ async def help_cmd(message: types.Message):
         "1️⃣ Скопируйте ссылку на видео\n"
         "2️⃣ Отправьте её боту\n"
         "3️⃣ Выберите качество\n"
-        "4️⃣ Видео >50 МБ сожмётся автоматически\n\n"
-        "*Совет:* Для больших видео выбирайте 720p",
+        "4️⃣ Если видео >50 МБ - автоматически сожмётся\n\n"
+        "*Совет:* Для больших видео выбирайте 720p или 480p\n\n"
+        "📋 /log - Показать логи",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -528,14 +609,12 @@ async def stats_cmd(message: types.Message):
             total_size += os.path.getsize(info['path'])
     
     ffmpeg_status = "✅" if check_ffmpeg() else "❌"
-    node_status = "✅" if check_nodejs() else "❌"
     
     await message.answer(
         f"📊 *Статистика*\n\n"
         f"📁 В кэше: {len(video_cache)}\n"
         f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
-        f"🗜️ FFmpeg: {ffmpeg_status}\n"
-        f"📦 Node.js: {node_status}",
+        f"🗜️ FFmpeg: {ffmpeg_status}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -560,11 +639,12 @@ async def handle_url(message: types.Message):
     log_message(f"Ссылка от {message.from_user.id}: {url[:100]}")
     
     if not (url.startswith("http://") or url.startswith("https://")):
-        await message.answer("❌ *Отправьте ссылку на видео*", parse_mode=ParseMode.MARKDOWN)
+        await message.answer("❌ *Отправьте ссылку на видео*\nСсылка должна начинаться с http:// или https://", parse_mode=ParseMode.MARKDOWN)
         return
     
     await message.answer(
-        "🎥 *Выберите качество:*",
+        "🎥 *Выберите качество:*\n\n"
+        "💡 *Совет:* Если видео большое, выберите 720p - оно сожмётся автоматически",
         reply_markup=get_keyboard(url),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -605,7 +685,7 @@ async def handle_callback(callback: CallbackQuery):
         
         if not file_path or not os.path.exists(file_path):
             await status_msg.edit_text(
-                "❌ *Не удалось скачать видео*\nПопробуйте другое качество",
+                "❌ *Не удалось скачать видео*\nПопробуйте другое качество или ссылку",
                 parse_mode=ParseMode.MARKDOWN
             )
             await callback.answer()
@@ -657,16 +737,15 @@ async def handle_callback(callback: CallbackQuery):
 async def main():
     print("=" * 60)
     print("🤖 БОТ ЗАПУЩЕН")
-    print("📦 АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ")
     print("=" * 60)
     
-    # Автоустановка для Linux
+    # Автоустановка зависимостей
     auto_install_all()
     
     print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
     print(f"🗜️ Папка сжатия: {os.path.abspath(COMPRESSED_DIR)}")
     print("=" * 60)
-    print("✅ БОТ ГОТОВ!")
+    print("✅ БОТ ГОТОВ К РАБОТЕ!")
     print("=" * 60)
     
     await dp.start_polling(bot)
