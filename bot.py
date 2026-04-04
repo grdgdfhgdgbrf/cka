@@ -18,7 +18,7 @@ from yt_dlp import YoutubeDL
 BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
 
 # ID администратора для получения логов (можно оставить None)
-ADMIN_ID = None  # Вставьте ваш Telegram ID, например: 123456789
+ADMIN_ID = 5356400377  # Вставьте ваш Telegram ID, например: 123456789
 
 DOWNLOAD_DIR = "downloads"
 CACHE_DIR = "cache"
