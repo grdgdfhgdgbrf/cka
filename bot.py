@@ -31,59 +31,31 @@ for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
-# ==================== ДИАГНОСТИКА COOKIES ====================
-def diagnose_cookies():
-    """Диагностика cookies файла"""
-    if not os.path.exists(COOKIES_FILE):
-        return "❌ Файл cookies.txt не найден"
-    
-    try:
-        with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        lines = content.split('\n')
-        valid_lines = 0
-        has_youtube = False
-        
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                valid_lines += 1
-                if '.youtube.com' in line or 'youtube.com' in line:
-                    has_youtube = True
-        
-        if valid_lines == 0:
-            return "❌ Cookies файл пуст или содержит только комментарии"
-        
-        if not has_youtube:
-            return f"⚠️ В cookies нет записей для YouTube (найдено {valid_lines} записей)"
-        
-        return f"✅ Cookies валидны: {valid_lines} записей, YouTube найден"
-        
-    except Exception as e:
-        return f"❌ Ошибка чтения cookies: {e}"
-
+# ==================== ПРОВЕРКА COOKIES ====================
 def check_cookies() -> bool:
-    """Проверка наличия и валидности cookies"""
-    if not os.path.exists(COOKIES_FILE):
+    """Проверка наличия и валидности cookies файла"""
+    if os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
+                content = f.read()
+                # Проверяем наличие важных YouTube cookies
+                has_youtube_cookies = any([
+                    'youtube.com' in content,
+                    '.youtube.com' in content,
+                    'LOGIN_INFO' in content,
+                    'VISITOR_INFO1_LIVE' in content
+                ])
+                if has_youtube_cookies:
+                    log_message("✅ Cookies файл найден и содержит YouTube cookies")
+                    return True
+                else:
+                    log_message("⚠️ Cookies файл не содержит YouTube cookies", "WARNING")
+                    return False
+        except Exception as e:
+            log_message(f"Ошибка чтения cookies: {e}", "ERROR")
+    else:
         log_message("❌ Cookies файл не найден", "WARNING")
-        return False
-    
-    try:
-        with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Проверяем что есть данные для YouTube
-        if '.youtube.com' in content or 'youtube.com' in content:
-            log_message("✅ Cookies файл найден и содержит YouTube данные")
-            return True
-        else:
-            log_message("⚠️ Cookies файл не содержит данных для YouTube", "WARNING")
-            return False
-            
-    except Exception as e:
-        log_message(f"❌ Ошибка проверки cookies: {e}", "ERROR")
-        return False
+    return False
 
 # ==================== ОПРЕДЕЛЕНИЕ ПУТЕЙ ====================
 def get_ffmpeg_path():
@@ -154,7 +126,7 @@ def install_ffmpeg():
         log_message("✅ FFmpeg установлен")
         return True
     except Exception as e:
-        log_message(f"Ошибка: {e}", "ERROR")
+        log_message(f"Ошибка установки: {e}", "ERROR")
         return False
 
 # ==================== СЖАТИЕ ВИДЕО ====================
@@ -206,17 +178,15 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
         if result.returncode == 0 and os.path.exists(output_path):
             return output_path
         return None
-            
     except Exception as e:
         log_message(f"Ошибка сжатия: {e}", "ERROR")
         return None
 
-# ==================== ПРЯМОЕ СКАЧИВАНИЕ С COOKIES ====================
+# ==================== СКАЧИВАНИЕ ВИДЕО (ИСПРАВЛЕННОЕ) ====================
 def download_video_sync(url: str, quality: str):
-    """Скачивание видео с YouTube используя cookies"""
+    """Скачивание видео с YouTube - исправленная версия"""
     video_id = hashlib.md5(f"{url}_{quality}".encode()).hexdigest()
     
-    # Проверка кэша
     if video_id in video_cache:
         cached = video_cache[video_id]
         if os.path.exists(cached['path']):
@@ -225,35 +195,18 @@ def download_video_sync(url: str, quality: str):
     
     log_message(f"Скачивание: {url[:50]}... | {quality}")
     
-    # Получаем абсолютный путь к cookies
-    cookies_abs_path = os.path.abspath(COOKIES_FILE)
-    
-    # Проверяем cookies перед скачиванием
-    cookies_exist = os.path.exists(cookies_abs_path)
-    if cookies_exist:
-        log_message(f"🍪 Использую cookies: {cookies_abs_path}")
-        # Читаем первые несколько байт для диагностики
-        try:
-            with open(cookies_abs_path, 'r') as f:
-                first_line = f.readline().strip()
-                log_message(f"🍪 Первая строка cookies: {first_line[:100]}")
-        except:
-            pass
-    else:
-        log_message(f"⚠️ Cookies не найдены по пути: {cookies_abs_path}", "WARNING")
-    
     try:
-        # Форматы качества
+        # Форматы для разных качеств
         quality_map = {
-            "144p": 'worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]',
-            "240p": 'bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]',
-            "360p": 'bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]',
-            "480p": 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]',
-            "720p": 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',
-            "1080p": 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]',
-            "best": 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]'
+            "144p": 'worst[height<=144]',
+            "240p": 'best[height<=240]',
+            "360p": 'best[height<=360]',
+            "480p": 'best[height<=480]',
+            "720p": 'best[height<=720]',
+            "1080p": 'best[height<=1080]',
+            "best": 'best'
         }
-        format_spec = quality_map.get(quality, 'best[ext=mp4]')
+        format_spec = quality_map.get(quality, 'best[height<=720]')
         
         # Базовые настройки
         opts = {
@@ -263,6 +216,7 @@ def download_video_sync(url: str, quality: str):
             'no_warnings': False,
             'ignoreerrors': True,
             'merge_output_format': 'mp4',
+            'extract_flat': False,
             'geo_bypass': True,
             'geo_bypass_country': 'US',
             'socket_timeout': 30,
@@ -270,57 +224,69 @@ def download_video_sync(url: str, quality: str):
             'fragment_retries': 10,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Connection': 'keep-alive',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0',
             }
         }
         
-        # Добавляем cookies ТОЛЬКО если файл существует и не пустой
-        if cookies_exist:
+        # Добавляем cookies в правильном формате
+        if os.path.exists(COOKIES_FILE):
+            opts['cookiefile'] = COOKIES_FILE
+            log_message("🍪 Использую cookies файл")
+            
+            # Также добавляем заголовок с cookies для надежности
             try:
-                # Проверяем что файл не пустой
-                if os.path.getsize(cookies_abs_path) > 100:
-                    opts['cookiefile'] = cookies_abs_path
-                    log_message("🍪 Cookies добавлены в настройки yt-dlp")
-                else:
-                    log_message("⚠️ Cookies файл слишком маленький, игнорирую", "WARNING")
-            except Exception as e:
-                log_message(f"⚠️ Ошибка при добавлении cookies: {e}", "WARNING")
+                with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
+                    cookie_content = f.read()
+                    # Ищем LOGIN_INFO cookie
+                    for line in cookie_content.split('\n'):
+                        if 'LOGIN_INFO' in line and '.youtube.com' in line:
+                            log_message("🍪 Найден LOGIN_INFO cookie")
+                            break
+            except:
+                pass
         
         # Пробуем скачать
         with YoutubeDL(opts) as ydl:
-            log_message("📡 Получение информации о видео...")
+            log_message("Получение информации о видео...")
             
-            # Сначала получаем информацию (без скачивания)
+            # Пробуем получить информацию
             try:
                 info = ydl.extract_info(url, download=False)
                 if not info:
                     log_message("❌ Не удалось получить информацию", "ERROR")
-                    return None, None, False
+                    # Пробуем без cookies
+                    if 'cookiefile' in opts:
+                        log_message("Пробую без cookies...")
+                        del opts['cookiefile']
+                        info = ydl.extract_info(url, download=False)
+                        if not info:
+                            return None, None, False
                 
                 title = info.get('title', 'video')
-                duration = info.get('duration', 0)
-                log_message(f"📹 Видео найдено: {title[:50]} (длит: {duration} сек)")
+                log_message(f"Видео найдено: {title[:50]}")
                 
-                # Если информация получена - скачиваем
-                log_message("⬇️ Начинаю скачивание...")
+                # Скачиваем
+                log_message("Скачивание...")
                 ydl.download([url])
                 
             except Exception as e:
-                error_msg = str(e)
-                log_message(f"❌ Ошибка yt-dlp: {error_msg}", "ERROR")
-                
-                # Если ошибка связана с cookies, пробуем без них
-                if 'cookies' in error_msg.lower() or '403' in error_msg:
-                    log_message("🔄 Пробую скачать без cookies...")
-                    opts.pop('cookiefile', None)
-                    with YoutubeDL(opts) as ydl2:
-                        info = ydl2.extract_info(url, download=True)
-                        title = info.get('title', 'video')
-                else:
-                    return None, None, False
+                log_message(f"Ошибка: {e}", "ERROR")
+                # Пробуем другой формат
+                log_message("Пробую другой формат...")
+                opts['format'] = 'best'
+                if 'cookiefile' in opts:
+                    del opts['cookiefile']
+                with YoutubeDL(opts) as ydl2:
+                    info = ydl2.extract_info(url, download=True)
+                    title = info.get('title', 'video')
             
             title = info.get('title', 'video')
             if not title:
@@ -328,7 +294,7 @@ def download_video_sync(url: str, quality: str):
             
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
-            # Поиск скачанного файла
+            # Поиск файла
             filename = None
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.endswith('.mp4') and title in f:
@@ -339,7 +305,7 @@ def download_video_sync(url: str, quality: str):
                 mp4_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.endswith('.mp4')]
                 if mp4_files:
                     filename = max(mp4_files, key=os.path.getmtime)
-                    log_message(f"📁 Найден файл: {os.path.basename(filename)}")
+                    log_message(f"Найден файл: {os.path.basename(filename)}")
                 else:
                     log_message("❌ Файл не найден", "ERROR")
                     return None, None, False
@@ -347,7 +313,6 @@ def download_video_sync(url: str, quality: str):
             file_size = os.path.getsize(filename) / (1024 * 1024)
             log_message(f"✅ Скачано: {title[:50]}... ({file_size:.1f} МБ)")
             
-            # Сохраняем в кэш
             video_cache[video_id] = {
                 'path': filename,
                 'title': title,
@@ -361,7 +326,7 @@ def download_video_sync(url: str, quality: str):
             return filename, title, False
             
     except Exception as e:
-        log_message(f"❌ Критическая ошибка: {e}", "ERROR")
+        log_message(f"Ошибка: {e}", "ERROR")
         log_message(traceback.format_exc(), "ERROR")
         return None, None, False
 
@@ -375,8 +340,6 @@ def download_audio_sync(url: str):
             return cached['path'], cached['title'], True
     
     try:
-        cookies_abs_path = os.path.abspath(COOKIES_FILE)
-        
         opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
@@ -394,8 +357,8 @@ def download_audio_sync(url: str):
             }
         }
         
-        if os.path.exists(cookies_abs_path) and os.path.getsize(cookies_abs_path) > 100:
-            opts['cookiefile'] = cookies_abs_path
+        if os.path.exists(COOKIES_FILE):
+            opts['cookiefile'] = COOKIES_FILE
         
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -427,10 +390,10 @@ def download_audio_sync(url: str):
             return filename, title, False
             
     except Exception as e:
-        log_message(f"Ошибка аудио: {e}", "ERROR")
+        log_message(f"Ошибка: {e}", "ERROR")
         return None, None, False
 
-# ==================== ОТПРАВКА ====================
+# ==================== ОТПРАВКА ВИДЕО ====================
 async def send_video_with_compress(message, file_path: str, title: str, quality: str, from_cache: bool = False):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     LIMIT = 49
@@ -444,7 +407,6 @@ async def send_video_with_compress(message, file_path: str, title: str, quality:
                 caption=f"✅ *{title[:80]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ",
                 parse_mode=ParseMode.MARKDOWN
             )
-            log_message(f"✅ Отправлено ({file_size_mb:.1f} МБ)")
             return True
         
         status_msg = await message.answer(
@@ -466,22 +428,19 @@ async def send_video_with_compress(message, file_path: str, title: str, quality:
                     caption=f"✅ *{title[:80]}*{cache_text} 🗜️\n📹 {quality} | {new_size:.1f} МБ",
                     parse_mode=ParseMode.MARKDOWN
                 )
-                log_message(f"✅ Отправлено со сжатием ({new_size:.1f} МБ)")
                 try:
                     os.remove(compressed_path)
                 except:
                     pass
                 return True
             else:
-                await status_msg.edit_text("❌ *Не удалось сжать*", parse_mode=ParseMode.MARKDOWN)
+                await status_msg.edit_text("❌ *Не удалось сжать*\nПопробуйте качество ниже", parse_mode=ParseMode.MARKDOWN)
                 return False
         else:
             await status_msg.edit_text("❌ *Ошибка сжатия*", parse_mode=ParseMode.MARKDOWN)
             return False
-            
     except Exception as e:
         log_message(f"Ошибка: {e}", "ERROR")
-        await message.answer(f"❌ *Ошибка:* `{str(e)[:100]}`", parse_mode=ParseMode.MARKDOWN)
         return False
 
 # ==================== БОТ ====================
@@ -503,39 +462,13 @@ def get_keyboard(url: str):
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    cookies_status = check_cookies()
     await message.answer(
-        f"🎬 *Видео-Бот*\n\n"
-        f"📹 Отправьте ссылку на YouTube\n\n"
-        f"🍪 Cookies: {'✅' if cookies_status else '❌'}\n\n"
-        f"*Команды:*\n"
-        f"/cookies - Диагностика cookies\n"
-        f"/stats - Статистика\n"
-        f"/clear - Очистить кэш\n"
-        f"/log - Логи",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-@dp.message(Command("cookies"))
-async def cookies_cmd(message: types.Message):
-    """Диагностика cookies"""
-    diagnosis = diagnose_cookies()
-    
-    # Показываем путь к файлу
-    abs_path = os.path.abspath(COOKIES_FILE)
-    
-    await message.answer(
-        f"🍪 *Диагностика cookies*\n\n"
-        f"📁 Путь: `{abs_path}`\n"
-        f"📊 Статус: {diagnosis}\n\n"
-        f"*Как получить cookies:*\n"
-        f"1. Установите расширение 'Get cookies.txt LOCALLY'\n"
-        f"2. Войдите в YouTube\n"
-        f"3. Нажмите на иконку расширения → Export\n"
-        f"4. Сохраните файл как `cookies.txt`\n"
-        f"5. Поместите в папку с ботом\n\n"
-        f"*Проверка:*\n"
-        f"`cat cookies.txt | head -5`",
+        "🎬 *Видео-Бот*\n\n"
+        "📹 Отправьте ссылку на видео с YouTube\n\n"
+        "*Команды:*\n"
+        "/stats - Статистика\n"
+        "/clear - Очистить кэш\n"
+        "/log - Логи",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -547,8 +480,6 @@ async def log_cmd(message: types.Message):
             last_lines = lines[-30:] if len(lines) > 30 else lines
             log_text = "".join(last_lines)
             await message.answer(f"📋 *Логи:*\n```\n{log_text[:3500]}\n```", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.answer("Логов нет")
 
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
@@ -557,15 +488,10 @@ async def stats_cmd(message: types.Message):
         if os.path.exists(info.get('path', '')):
             total_size += os.path.getsize(info['path'])
     
-    ffmpeg_status = "✅" if check_ffmpeg() else "❌"
-    cookies_status = "✅" if check_cookies() else "❌"
-    
     await message.answer(
         f"📊 *Статистика*\n\n"
         f"📁 В кэше: {len(video_cache)}\n"
-        f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
-        f"🗜️ FFmpeg: {ffmpeg_status}\n"
-        f"🍪 Cookies: {cookies_status}",
+        f"💾 Занято: {total_size/(1024*1024):.1f} МБ",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -587,20 +513,13 @@ async def clear_cmd(message: types.Message):
 @dp.message()
 async def handle_url(message: types.Message):
     url = message.text.strip()
-    log_message(f"Ссылка от {message.from_user.id}: {url[:100]}")
     
     if not (url.startswith("http://") or url.startswith("https://")):
-        await message.answer("❌ *Отправьте ссылку на видео*", parse_mode=ParseMode.MARKDOWN)
+        await message.answer("❌ *Отправьте ссылку*", parse_mode=ParseMode.MARKDOWN)
         return
     
-    # Диагностика cookies перед скачиванием
-    cookies_diagnosis = diagnose_cookies()
-    log_message(f"🍪 {cookies_diagnosis}")
-    
     await message.answer(
-        f"🎥 *Выберите качество:*\n\n"
-        f"🍪 {cookies_diagnosis}\n\n"
-        f"💡 Если видео не скачивается - используйте /cookies",
+        "🎥 *Выберите качество:*",
         reply_markup=get_keyboard(url),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -632,7 +551,7 @@ async def handle_callback(callback: CallbackQuery):
         quality_name = quality_names.get(quality, quality)
         
         status_msg = await callback.message.edit_text(
-            f"⏳ *Скачиваю {quality_name}...*\nЭто может занять 1-3 минуты",
+            f"⏳ *Скачиваю {quality_name}...*\nЭто может занять 1-2 минуты",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -641,12 +560,12 @@ async def handle_callback(callback: CallbackQuery):
         
         if not file_path:
             await status_msg.edit_text(
-                "❌ *Не удалось скачать видео*\n\n"
-                "Проверьте cookies командой /cookies\n\n"
-                "Возможные причины:\n"
-                "• Нет или устаревшие cookies\n"
-                "• YouTube блокирует запросы\n"
-                "• Видео недоступно",
+                "❌ *Ошибка скачивания*\n\n"
+                "YouTube блокирует запросы.\n"
+                "Попробуйте:\n"
+                "• Подождать 5-10 минут\n"
+                "• Другую ссылку\n"
+                "• Качество 360p или 480p",
                 parse_mode=ParseMode.MARKDOWN
             )
             await callback.answer()
@@ -699,25 +618,19 @@ async def main():
     print("🤖 БОТ ЗАПУЩЕН")
     print("=" * 60)
     
-    # FFmpeg
     if not check_ffmpeg():
         print("⚠️ Установка FFmpeg...")
         install_ffmpeg()
     else:
         print("✅ FFmpeg готов")
     
-    # Диагностика cookies
-    print(f"🍪 {diagnose_cookies()}")
-    print(f"📁 Путь к cookies: {os.path.abspath(COOKIES_FILE)}")
+    # Проверка cookies
+    if check_cookies():
+        print("✅ Cookies найден")
+    else:
+        print("⚠️ Cookies не найден")
     
-    # Обновление yt-dlp
-    try:
-        print("🔄 Обновление yt-dlp...")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'])
-        print("✅ yt-dlp обновлён")
-    except:
-        pass
-    
+    print(f"📁 Папка: {os.path.abspath(DOWNLOAD_DIR)}")
     print("=" * 60)
     print("✅ БОТ ГОТОВ!")
     print("=" * 60)
