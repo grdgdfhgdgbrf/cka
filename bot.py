@@ -9,6 +9,7 @@ import shutil
 import urllib.request
 import zipfile
 import stat
+import ctypes
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -30,7 +31,7 @@ for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
-# Глобальные пути к FFmpeg (устанавливаются при запуске)
+# Глобальные пути к FFmpeg
 FFMPEG_PATH = None
 FFPROBE_PATH = None
 
@@ -64,8 +65,37 @@ def save_cache(cache):
 video_cache = load_cache()
 log_message(f"Загружено {len(video_cache)} записей")
 
+# ==================== РАБОТА С ПРАВАМИ ДОСТУПА ====================
+def grant_permissions(file_path: str):
+    """Выдача прав на выполнение файла"""
+    try:
+        # Для Windows
+        if sys.platform == "win32":
+            os.chmod(file_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+        else:
+            os.chmod(file_path, 0o755)
+        return True
+    except Exception as e:
+        log_message(f"Не удалось выдать права для {file_path}: {e}", "WARNING")
+        return False
+
+def run_cmd_with_permissions(cmd):
+    """Запуск команды с обработкой прав доступа"""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return result
+    except PermissionError:
+        # Если ошибка прав, пробуем снять блокировку
+        for i, arg in enumerate(cmd):
+            if 'ffmpeg' in arg or 'ffprobe' in arg:
+                grant_permissions(arg)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log_message(f"Ошибка выполнения команды: {e}", "ERROR")
+        return None
+
 # ==================== УСТАНОВКА FFMPEG ДЛЯ WINDOWS ====================
-def download_file_with_progress(url: str, dest: str):
+def download_file(url: str, dest: str):
     """Скачивание файла"""
     urllib.request.urlretrieve(url, dest)
 
@@ -76,14 +106,13 @@ def install_ffmpeg_windows():
     try:
         log_message("🚀 Установка FFmpeg для Windows...")
         
-        # URL для скачивания
         ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
         zip_path = os.path.join(TOOLS_DIR, "ffmpeg.zip")
         extract_path = os.path.join(TOOLS_DIR, "ffmpeg_extract")
         
         # Скачиваем
         log_message("📥 Скачивание FFmpeg...")
-        download_file_with_progress(ffmpeg_url, zip_path)
+        download_file(ffmpeg_url, zip_path)
         
         # Распаковываем
         log_message("📦 Распаковка...")
@@ -107,11 +136,12 @@ def install_ffmpeg_windows():
             shutil.rmtree(target_bin, ignore_errors=True)
         os.makedirs(target_bin, exist_ok=True)
         
-        # Копируем файлы
+        # Копируем файлы и выдаем права
         for file in os.listdir(bin_path):
             src = os.path.join(bin_path, file)
             dst = os.path.join(target_bin, file)
             shutil.copy2(src, dst)
+            grant_permissions(dst)
         
         # Устанавливаем глобальные пути
         FFMPEG_PATH = os.path.join(target_bin, "ffmpeg.exe")
@@ -135,7 +165,7 @@ def install_ffmpeg_windows():
         return False
 
 def check_ffmpeg():
-    """Проверка наличия FFmpeg и установка глобальных путей"""
+    """Проверка наличия FFmpeg"""
     global FFMPEG_PATH, FFPROBE_PATH
     
     # Проверяем в tools/ffmpeg/bin
@@ -145,8 +175,19 @@ def check_ffmpeg():
     if os.path.exists(local_ffmpeg) and os.path.exists(local_ffprobe):
         FFMPEG_PATH = local_ffmpeg
         FFPROBE_PATH = local_ffprobe
-        log_message(f"✅ FFmpeg найден: {FFMPEG_PATH}")
-        return True
+        grant_permissions(FFMPEG_PATH)
+        grant_permissions(FFPROBE_PATH)
+        
+        # Проверяем работу
+        try:
+            result = subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                log_message(f"✅ FFmpeg работает: {FFMPEG_PATH}")
+                return True
+            else:
+                log_message(f"⚠️ FFmpeg не отвечает: {result.stderr[:100]}", "WARNING")
+        except Exception as e:
+            log_message(f"⚠️ Ошибка при проверке FFmpeg: {e}", "WARNING")
     
     # Проверяем в системном PATH
     system_ffmpeg = shutil.which("ffmpeg.exe")
@@ -162,7 +203,7 @@ def check_ffmpeg():
     return False
 
 def ensure_ffmpeg():
-    """Гарантирует наличие FFmpeg, устанавливает если нужно"""
+    """Гарантирует наличие FFmpeg"""
     if check_ffmpeg():
         return True
     
@@ -214,7 +255,7 @@ def delete_cookies():
 
 # ==================== СЖАТИЕ ВИДЕО ====================
 def get_video_duration(file_path: str) -> float:
-    """Получение длительности видео через ffprobe"""
+    """Получение длительности видео"""
     global FFPROBE_PATH
     
     if not FFPROBE_PATH or not os.path.exists(FFPROBE_PATH):
@@ -225,9 +266,9 @@ def get_video_duration(file_path: str) -> float:
         cmd = [FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration',
                '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = run_cmd_with_permissions(cmd)
         
-        if result.returncode == 0 and result.stdout.strip():
+        if result and result.returncode == 0 and result.stdout.strip():
             duration = float(result.stdout.strip())
             log_message(f"Длительность видео: {duration:.1f} сек")
             return duration
@@ -237,7 +278,7 @@ def get_video_duration(file_path: str) -> float:
         return 60.0
 
 def compress_video(input_path: str, target_size_mb: int = 48) -> str:
-    """Сжатие видео через ffmpeg"""
+    """Сжатие видео"""
     global FFMPEG_PATH
     
     if not FFMPEG_PATH or not os.path.exists(FFMPEG_PATH):
@@ -271,6 +312,7 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
         
         log_message(f"Сжатие: битрейт {video_bitrate} bps, длительность {duration:.1f} сек")
         
+        # Запускаем сжатие
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         if result.returncode == 0 and os.path.exists(output_path):
@@ -283,6 +325,9 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
                 log_message(f"Ошибка FFmpeg: {result.stderr[:200]}", "ERROR")
             return None
             
+    except subprocess.TimeoutExpired:
+        log_message("❌ Сжатие превысило лимит времени", "ERROR")
+        return None
     except Exception as e:
         log_message(f"Ошибка сжатия: {e}", "ERROR")
         return None
@@ -322,6 +367,7 @@ def download_video_sync(url: str, quality: str):
             'geo_bypass_country': 'US',
             'socket_timeout': 30,
             'retries': 10,
+            'fragment_retries': 10,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -749,8 +795,6 @@ async def main():
         print(f"✅ ffprobe готов: {FFPROBE_PATH}")
     else:
         print("❌ КРИТИЧЕСКАЯ ОШИБКА: FFmpeg не установлен")
-        print("📥 Скачайте FFmpeg вручную: https://ffmpeg.org/download.html")
-        print("📁 Или поместите ffmpeg.exe и ffprobe.exe в папку tools/ffmpeg/bin/")
     
     cookies_info = check_cookies()
     print(f"🍪 {cookies_info['message']}")
