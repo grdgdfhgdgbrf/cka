@@ -8,8 +8,8 @@ import traceback
 import shutil
 import urllib.request
 import zipfile
-import stat
-import ctypes
+import tarfile
+import platform
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -65,133 +65,14 @@ def save_cache(cache):
 video_cache = load_cache()
 log_message(f"Загружено {len(video_cache)} записей")
 
-# ==================== РАБОТА С ПРАВАМИ ДОСТУПА ====================
-def grant_permissions(file_path: str):
-    """Выдача прав на выполнение файла"""
-    try:
-        # Для Windows
-        if sys.platform == "win32":
-            os.chmod(file_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
-        else:
-            os.chmod(file_path, 0o755)
-        return True
-    except Exception as e:
-        log_message(f"Не удалось выдать права для {file_path}: {e}", "WARNING")
-        return False
-
-def run_cmd_with_permissions(cmd):
-    """Запуск команды с обработкой прав доступа"""
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return result
-    except PermissionError:
-        # Если ошибка прав, пробуем снять блокировку
-        for i, arg in enumerate(cmd):
-            if 'ffmpeg' in arg or 'ffprobe' in arg:
-                grant_permissions(arg)
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except Exception as e:
-        log_message(f"Ошибка выполнения команды: {e}", "ERROR")
-        return None
-
-# ==================== УСТАНОВКА FFMPEG ДЛЯ WINDOWS ====================
-def download_file(url: str, dest: str):
-    """Скачивание файла"""
-    urllib.request.urlretrieve(url, dest)
-
-def install_ffmpeg_windows():
-    """Установка FFmpeg на Windows"""
-    global FFMPEG_PATH, FFPROBE_PATH
-    
-    try:
-        log_message("🚀 Установка FFmpeg для Windows...")
-        
-        ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-        zip_path = os.path.join(TOOLS_DIR, "ffmpeg.zip")
-        extract_path = os.path.join(TOOLS_DIR, "ffmpeg_extract")
-        
-        # Скачиваем
-        log_message("📥 Скачивание FFmpeg...")
-        download_file(ffmpeg_url, zip_path)
-        
-        # Распаковываем
-        log_message("📦 Распаковка...")
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
-        
-        # Находим bin папку
-        bin_path = None
-        for root, dirs, files in os.walk(extract_path):
-            if 'ffmpeg.exe' in files:
-                bin_path = root
-                break
-        
-        if not bin_path:
-            log_message("❌ Не найдена папка bin", "ERROR")
-            return False
-        
-        # Создаем целевую папку
-        target_bin = os.path.join(TOOLS_DIR, "ffmpeg", "bin")
-        if os.path.exists(target_bin):
-            shutil.rmtree(target_bin, ignore_errors=True)
-        os.makedirs(target_bin, exist_ok=True)
-        
-        # Копируем файлы и выдаем права
-        for file in os.listdir(bin_path):
-            src = os.path.join(bin_path, file)
-            dst = os.path.join(target_bin, file)
-            shutil.copy2(src, dst)
-            grant_permissions(dst)
-        
-        # Устанавливаем глобальные пути
-        FFMPEG_PATH = os.path.join(target_bin, "ffmpeg.exe")
-        FFPROBE_PATH = os.path.join(target_bin, "ffprobe.exe")
-        
-        # Очистка
-        os.remove(zip_path)
-        shutil.rmtree(extract_path, ignore_errors=True)
-        
-        # Проверяем
-        if os.path.exists(FFMPEG_PATH) and os.path.exists(FFPROBE_PATH):
-            log_message(f"✅ FFmpeg установлен: {FFMPEG_PATH}")
-            return True
-        else:
-            log_message("❌ Ошибка при копировании файлов", "ERROR")
-            return False
-            
-    except Exception as e:
-        log_message(f"Ошибка установки: {e}", "ERROR")
-        log_message(traceback.format_exc(), "ERROR")
-        return False
-
+# ==================== УСТАНОВКА FFMPEG ДЛЯ LINUX ====================
 def check_ffmpeg():
-    """Проверка наличия FFmpeg"""
+    """Проверка наличия FFmpeg в системе"""
     global FFMPEG_PATH, FFPROBE_PATH
     
-    # Проверяем в tools/ffmpeg/bin
-    local_ffmpeg = os.path.join(TOOLS_DIR, "ffmpeg", "bin", "ffmpeg.exe")
-    local_ffprobe = os.path.join(TOOLS_DIR, "ffmpeg", "bin", "ffprobe.exe")
-    
-    if os.path.exists(local_ffmpeg) and os.path.exists(local_ffprobe):
-        FFMPEG_PATH = local_ffmpeg
-        FFPROBE_PATH = local_ffprobe
-        grant_permissions(FFMPEG_PATH)
-        grant_permissions(FFPROBE_PATH)
-        
-        # Проверяем работу
-        try:
-            result = subprocess.run([FFMPEG_PATH, '-version'], capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                log_message(f"✅ FFmpeg работает: {FFMPEG_PATH}")
-                return True
-            else:
-                log_message(f"⚠️ FFmpeg не отвечает: {result.stderr[:100]}", "WARNING")
-        except Exception as e:
-            log_message(f"⚠️ Ошибка при проверке FFmpeg: {e}", "WARNING")
-    
-    # Проверяем в системном PATH
-    system_ffmpeg = shutil.which("ffmpeg.exe")
-    system_ffprobe = shutil.which("ffprobe.exe")
+    # Проверяем через which
+    system_ffmpeg = shutil.which("ffmpeg")
+    system_ffprobe = shutil.which("ffprobe")
     
     if system_ffmpeg and system_ffprobe:
         FFMPEG_PATH = system_ffmpeg
@@ -199,16 +80,136 @@ def check_ffmpeg():
         log_message(f"✅ FFmpeg найден в PATH: {FFMPEG_PATH}")
         return True
     
+    # Проверяем в tools папке
+    local_ffmpeg = os.path.join(TOOLS_DIR, "ffmpeg", "bin", "ffmpeg")
+    local_ffprobe = os.path.join(TOOLS_DIR, "ffmpeg", "bin", "ffprobe")
+    
+    if os.path.exists(local_ffmpeg) and os.path.exists(local_ffprobe):
+        FFMPEG_PATH = local_ffmpeg
+        FFPROBE_PATH = local_ffprobe
+        os.chmod(FFMPEG_PATH, 0o755)
+        os.chmod(FFPROBE_PATH, 0o755)
+        log_message(f"✅ FFmpeg найден локально: {FFMPEG_PATH}")
+        return True
+    
     log_message("❌ FFmpeg не найден", "WARNING")
     return False
 
+def install_ffmpeg_linux_apt():
+    """Установка FFmpeg через apt (Debian/Ubuntu)"""
+    try:
+        log_message("🚀 Установка FFmpeg через apt...")
+        
+        # Обновляем пакеты
+        subprocess.run(['apt-get', 'update'], capture_output=True, timeout=60)
+        
+        # Устанавливаем FFmpeg
+        subprocess.run(['apt-get', 'install', '-y', 'ffmpeg'], capture_output=True, timeout=120)
+        
+        # Проверяем установку
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            log_message("✅ FFmpeg установлен через apt")
+            return True
+        return False
+    except Exception as e:
+        log_message(f"Ошибка apt установки: {e}", "ERROR")
+        return False
+
+def install_ffmpeg_linux_yum():
+    """Установка FFmpeg через yum (CentOS/RHEL)"""
+    try:
+        log_message("🚀 Установка FFmpeg через yum...")
+        
+        # Устанавливаем EPEL
+        subprocess.run(['yum', 'install', '-y', 'epel-release'], capture_output=True, timeout=60)
+        
+        # Устанавливаем FFmpeg
+        subprocess.run(['yum', 'install', '-y', 'ffmpeg'], capture_output=True, timeout=120)
+        
+        # Проверяем установку
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            log_message("✅ FFmpeg установлен через yum")
+            return True
+        return False
+    except Exception as e:
+        log_message(f"Ошибка yum установки: {e}", "ERROR")
+        return False
+
+def install_ffmpeg_linux_manual():
+    """Ручная установка FFmpeg (скачивание бинарников)"""
+    try:
+        log_message("🚀 Ручная установка FFmpeg...")
+        
+        # Определяем архитектуру
+        arch = platform.machine()
+        if arch == "x86_64":
+            ffmpeg_url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+        elif arch == "aarch64":
+            ffmpeg_url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz"
+        else:
+            ffmpeg_url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-i686-static.tar.xz"
+        
+        tar_path = os.path.join(TOOLS_DIR, "ffmpeg.tar.xz")
+        extract_path = os.path.join(TOOLS_DIR, "ffmpeg_extract")
+        
+        # Скачиваем
+        log_message(f"📥 Скачивание FFmpeg...")
+        urllib.request.urlretrieve(ffmpeg_url, tar_path)
+        
+        # Распаковываем
+        log_message("📦 Распаковка...")
+        with tarfile.open(tar_path, "r:xz") as tar:
+            tar.extractall(extract_path)
+        
+        # Находим папку с ffmpeg
+        for item in os.listdir(extract_path):
+            if item.startswith("ffmpeg-") and os.path.isdir(os.path.join(extract_path, item)):
+                source_dir = os.path.join(extract_path, item)
+                target_bin = os.path.join(TOOLS_DIR, "ffmpeg", "bin")
+                
+                if os.path.exists(target_bin):
+                    shutil.rmtree(target_bin, ignore_errors=True)
+                os.makedirs(target_bin, exist_ok=True)
+                
+                # Копируем файлы
+                for file in ['ffmpeg', 'ffprobe']:
+                    src = os.path.join(source_dir, file)
+                    if os.path.exists(src):
+                        dst = os.path.join(target_bin, file)
+                        shutil.copy2(src, dst)
+                        os.chmod(dst, 0o755)
+                break
+        
+        # Очистка
+        os.remove(tar_path)
+        shutil.rmtree(extract_path, ignore_errors=True)
+        
+        log_message("✅ FFmpeg установлен вручную")
+        return True
+        
+    except Exception as e:
+        log_message(f"Ошибка ручной установки: {e}", "ERROR")
+        return False
+
 def ensure_ffmpeg():
     """Гарантирует наличие FFmpeg"""
+    global FFMPEG_PATH, FFPROBE_PATH
+    
     if check_ffmpeg():
         return True
     
     log_message("⚠️ FFmpeg не найден, начинаю установку...")
-    if install_ffmpeg_windows():
+    
+    # Пробуем разные способы установки
+    if install_ffmpeg_linux_apt():
+        return check_ffmpeg()
+    
+    if install_ffmpeg_linux_yum():
+        return check_ffmpeg()
+    
+    if install_ffmpeg_linux_manual():
         return check_ffmpeg()
     
     log_message("❌ Не удалось установить FFmpeg", "ERROR")
@@ -255,30 +256,25 @@ def delete_cookies():
 
 # ==================== СЖАТИЕ ВИДЕО ====================
 def get_video_duration(file_path: str) -> float:
-    """Получение длительности видео"""
     global FFPROBE_PATH
     
     if not FFPROBE_PATH or not os.path.exists(FFPROBE_PATH):
-        log_message("❌ ffprobe не найден", "ERROR")
         return 60.0
     
     try:
         cmd = [FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration',
                '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
         
-        result = run_cmd_with_permissions(cmd)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
-        if result and result.returncode == 0 and result.stdout.strip():
-            duration = float(result.stdout.strip())
-            log_message(f"Длительность видео: {duration:.1f} сек")
-            return duration
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
         return 60.0
     except Exception as e:
         log_message(f"Ошибка получения длительности: {e}", "ERROR")
         return 60.0
 
 def compress_video(input_path: str, target_size_mb: int = 48) -> str:
-    """Сжатие видео"""
     global FFMPEG_PATH
     
     if not FFMPEG_PATH or not os.path.exists(FFMPEG_PATH):
@@ -288,17 +284,14 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
     try:
         duration = get_video_duration(input_path)
         
-        # Рассчитываем битрейт
         target_bits = target_size_mb * 8 * 1024 * 1024
         video_bitrate = int(target_bits / duration)
         video_bitrate = max(300000, min(video_bitrate, 2000000))
         
-        # Выходной файл
         base_name = os.path.basename(input_path)
         name_without_ext = os.path.splitext(base_name)[0]
         output_path = os.path.join(COMPRESSED_DIR, f"{name_without_ext}_compressed.mp4")
         
-        # Команда сжатия
         cmd = [
             FFMPEG_PATH, '-i', input_path,
             '-b:v', f'{video_bitrate}',
@@ -312,7 +305,6 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
         
         log_message(f"Сжатие: битрейт {video_bitrate} bps, длительность {duration:.1f} сек")
         
-        # Запускаем сжатие
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         if result.returncode == 0 and os.path.exists(output_path):
@@ -325,9 +317,6 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
                 log_message(f"Ошибка FFmpeg: {result.stderr[:200]}", "ERROR")
             return None
             
-    except subprocess.TimeoutExpired:
-        log_message("❌ Сжатие превысило лимит времени", "ERROR")
-        return None
     except Exception as e:
         log_message(f"Ошибка сжатия: {e}", "ERROR")
         return None
@@ -367,9 +356,8 @@ def download_video_sync(url: str, quality: str):
             'geo_bypass_country': 'US',
             'socket_timeout': 30,
             'retries': 10,
-            'fragment_retries': 10,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
             }
@@ -443,7 +431,7 @@ def download_audio_sync(url: str):
             }],
             'geo_bypass': True,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
             }
         }
         
@@ -786,21 +774,22 @@ async def handle_callback(callback: CallbackQuery):
 # ==================== ЗАПУСК ====================
 async def main():
     print("=" * 60)
-    print("🤖 БОТ ЗАПУЩЕН (WINDOWS)")
+    print(f"🤖 БОТ ЗАПУЩЕН")
+    print(f"🖥️ Операционная система: {platform.system()} {platform.machine()}")
     print("=" * 60)
     
-    # Гарантированная установка FFmpeg
+    # Установка FFmpeg для Linux
     if ensure_ffmpeg():
         print(f"✅ FFmpeg готов: {FFMPEG_PATH}")
         print(f"✅ ffprobe готов: {FFPROBE_PATH}")
     else:
         print("❌ КРИТИЧЕСКАЯ ОШИБКА: FFmpeg не установлен")
+        print("📥 Установите FFmpeg вручную: sudo apt-get install ffmpeg")
     
     cookies_info = check_cookies()
     print(f"🍪 {cookies_info['message']}")
     
     print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
-    print(f"📁 Папка инструментов: {os.path.abspath(TOOLS_DIR)}")
     print("=" * 60)
     print("✅ БОТ ГОТОВ!")
     print("=" * 60)
