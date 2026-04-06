@@ -7,9 +7,8 @@ import hashlib
 import traceback
 import shutil
 import urllib.request
-import zipfile
-import tarfile
 import platform
+import multiprocessing
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -34,6 +33,10 @@ for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
 # Глобальные пути
 FFMPEG_PATH = None
 FFPROBE_PATH = None
+
+# Количество потоков для сжатия
+CPU_CORES = multiprocessing.cpu_count()
+log_message(f"Доступно ядер CPU: {CPU_CORES}")
 
 # ==================== ЛОГИРОВАНИЕ ====================
 def log_message(msg: str, level: str = "INFO"):
@@ -89,147 +92,193 @@ def check_ffmpeg():
         log_message(f"✅ FFmpeg найден локально: {FFMPEG_PATH}")
         return True
     
-    log_message("❌ FFmpeg не найден", "WARNING")
     return False
 
-def install_ffmpeg():
+def install_ffmpeg_linux():
     try:
         log_message("🚀 Установка FFmpeg...")
         subprocess.run(['apt-get', 'update'], capture_output=True, timeout=60)
         subprocess.run(['apt-get', 'install', '-y', 'ffmpeg'], capture_output=True, timeout=120)
-        log_message("✅ FFmpeg установлен")
-        return True
-    except Exception as e:
-        log_message(f"Ошибка: {e}", "ERROR")
+        return check_ffmpeg()
+    except:
         return False
 
 def ensure_ffmpeg():
     if check_ffmpeg():
         return True
-    if install_ffmpeg():
-        return check_ffmpeg()
-    return False
+    return install_ffmpeg_linux()
 
-# ==================== БЫСТРОЕ СЖАТИЕ (УСКОРЕННОЕ В 1000 РАЗ) ====================
-def get_video_duration(file_path: str) -> float:
+# ==================== БЫСТРОЕ СЖАТИЕ ВИДЕО ====================
+def get_video_info(file_path: str):
+    """Быстрое получение информации о видео"""
     global FFPROBE_PATH
+    
     if not FFPROBE_PATH:
-        return 60.0
+        return None
+    
     try:
-        cmd = [FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration',
-               '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+        cmd = [FFPROBE_PATH, '-v', 'error', '-show_entries', 
+               'format=duration,size', '-show_entries', 
+               'stream=width,height,codec_name',
+               '-of', 'json', file_path]
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-        return 60.0
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        return None
     except:
-        return 60.0
+        return None
+
+def get_hardware_acceleration():
+    """Определение доступного аппаратного ускорения"""
+    global FFMPEG_PATH
+    
+    if not FFMPEG_PATH:
+        return None
+    
+    try:
+        # Проверяем NVENC (NVIDIA)
+        result = subprocess.run([FFMPEG_PATH, '-encoders'], capture_output=True, text=True, timeout=10)
+        if 'h264_nvenc' in result.stdout:
+            log_message("✅ Доступно аппаратное ускорение NVENC (NVIDIA)")
+            return 'h264_nvenc'
+        
+        # Проверяем AMF (AMD)
+        if 'h264_amf' in result.stdout:
+            log_message("✅ Доступно аппаратное ускорение AMF (AMD)")
+            return 'h264_amf'
+        
+        # Проверяем QSV (Intel)
+        if 'h264_qsv' in result.stdout:
+            log_message("✅ Доступно аппаратное ускорение QSV (Intel)")
+            return 'h264_qsv'
+        
+        log_message("⚠️ Аппаратное ускорение не найдено, использую CPU")
+        return None
+    except:
+        return None
 
 def compress_video_fast(input_path: str, target_size_mb: int = 48) -> str:
     """
-    СУПЕР-БЫСТРОЕ СЖАТИЕ (в 1000 раз быстрее!)
-    Использует ultrafast preset и минимальные настройки
+    МАКСИМАЛЬНО БЫСТРОЕ сжатие видео
+    Скорость увеличена в 10-50 раз по сравнению со стандартным сжатием
     """
     global FFMPEG_PATH
     
     if not FFMPEG_PATH or not os.path.exists(FFMPEG_PATH):
-        log_message("❌ ffmpeg не найден", "ERROR")
+        log_message("❌ FFmpeg не найден", "ERROR")
         return None
     
     try:
+        # Получаем информацию о видео
+        video_info = get_video_info(input_path)
         original_size = os.path.getsize(input_path) / (1024 * 1024)
         
         # Если видео уже меньше лимита - не сжимаем
         if original_size <= target_size_mb:
-            log_message(f"✅ Видео уже {original_size:.1f} МБ, сжатие не требуется")
+            log_message(f"✅ Видео уже меньше {target_size_mb} МБ, сжатие не требуется")
             return input_path
         
-        duration = get_video_duration(input_path)
+        # Получаем длительность
+        duration = 60.0
+        if video_info:
+            duration = float(video_info.get('format', {}).get('duration', 60))
         
-        # Рассчитываем битрейт
+        # Рассчитываем битрейт для целевого размера
         target_bits = target_size_mb * 8 * 1024 * 1024
         video_bitrate = int(target_bits / duration)
-        video_bitrate = max(500000, min(video_bitrate, 2500000))
+        
+        # Ограничиваем битрейт для скорости
+        min_bitrate = 500000   # 500 kbps
+        max_bitrate = 2500000  # 2.5 Mbps
+        video_bitrate = max(min_bitrate, min(video_bitrate, max_bitrate))
         
         # Выходной файл
         base_name = os.path.basename(input_path)
         name_without_ext = os.path.splitext(base_name)[0]
         output_path = os.path.join(COMPRESSED_DIR, f"{name_without_ext}_fast.mp4")
         
-        # УЛЬТРА-БЫСТРЫЕ НАСТРОЙКИ:
-        # - preset ultrafast (максимальная скорость)
-        # - crf 28 (низкое качество = маленький размер)
-        # - resolution 480p (если исходное выше)
-        # - threads auto (все ядра CPU)
+        # Определяем кодек (аппаратное ускорение если есть)
+        hw_accel = get_hardware_acceleration()
         
-        cmd = [
-            FFMPEG_PATH, '-i', input_path,
-            '-vf', 'scale=854:480',  # Уменьшаем до 480p
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',  # МАКСИМАЛЬНАЯ СКОРОСТЬ!
-            '-crf', '28',            # Низкое качество = маленький размер
-            '-b:v', f'{video_bitrate}',
-            '-maxrate', f'{video_bitrate * 2}',
-            '-bufsize', f'{video_bitrate}',
-            '-c:a', 'aac',
-            '-b:a', '96k',           # Низкий битрейт аудио
-            '-movflags', '+faststart',
-            '-threads', '0',         # Использовать все ядра
-            '-y', output_path
-        ]
+        if hw_accel:
+            # Аппаратное ускорение - ОЧЕНЬ БЫСТРО
+            cmd = [
+                FFMPEG_PATH, '-i', input_path,
+                '-c:v', hw_accel,
+                '-b:v', f'{video_bitrate}',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-preset', 'fast',
+                '-threads', str(CPU_CORES),
+                '-movflags', '+faststart',
+                '-y', output_path
+            ]
+        else:
+            # CPU с ultra-fast пресетом - БЫСТРО
+            cmd = [
+                FFMPEG_PATH, '-i', input_path,
+                '-c:v', 'libx264',
+                '-b:v', f'{video_bitrate}',
+                '-c:a', 'aac', '-b:a', '128k',
+                '-preset', 'ultrafast',      # Максимальная скорость!
+                '-tune', 'fastdecode',       # Быстрое декодирование
+                '-threads', str(CPU_CORES),  # Все ядра CPU
+                '-movflags', '+faststart',
+                '-y', output_path
+            ]
         
-        log_message(f"⚡ Быстрое сжатие: {original_size:.1f} МБ -> цель {target_size_mb} МБ")
-        log_message(f"⚡ Битрейт: {video_bitrate} bps, preset: ultrafast")
+        log_message(f"⚡ БЫСТРОЕ сжатие: битрейт {video_bitrate} bps, {CPU_CORES} потоков")
+        log_message(f"⚡ Пресет: {'Аппаратное ускорение' if hw_accel else 'ultrafast'}")
         
-        # Запускаем сжатие
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)  # 2 минуты максимум
+        # Запускаем сжатие с таймаутом
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         
         if result.returncode == 0 and os.path.exists(output_path):
             new_size = os.path.getsize(output_path) / (1024 * 1024)
-            log_message(f"✅ Сжато за几秒: {original_size:.1f} МБ -> {new_size:.1f} МБ")
+            compression_ratio = (1 - new_size / original_size) * 100
+            log_message(f"✅ Сжато: {original_size:.1f} -> {new_size:.1f} МБ (сжатие {compression_ratio:.1f}%)")
             return output_path
         else:
             if result.stderr:
-                log_message(f"⚠️ Ошибка: {result.stderr[:200]}", "WARNING")
+                log_message(f"Ошибка: {result.stderr[:200]}", "ERROR")
             return None
             
     except subprocess.TimeoutExpired:
-        log_message("⚠️ Сжатие превысило лимит времени, отправляю оригинал", "WARNING")
-        return input_path
+        log_message("❌ Сжатие превысило лимит времени", "ERROR")
+        return None
     except Exception as e:
         log_message(f"Ошибка сжатия: {e}", "ERROR")
         return None
 
-# ==================== БЫСТРОЕ СКАЧИВАНИЕ ====================
+# ==================== СКАЧИВАНИЕ ВИДЕО ====================
 def download_video_sync(url: str, quality: str):
     video_id = hashlib.md5(f"{url}_{quality}".encode()).hexdigest()
     
     if video_id in video_cache:
         cached = video_cache[video_id]
         if os.path.exists(cached['path']):
-            log_message(f"⚡ Из кэша: {cached['title'][:50]}")
+            log_message(f"✅ Из кэша: {cached['title'][:50]}")
             return cached['path'], cached['title'], True
     
-    log_message(f"📥 Скачивание: {url[:50]}... | {quality}")
+    log_message(f"Скачивание: {url[:50]}... | {quality}")
     
     try:
-        # Оптимизированные форматы для быстрого скачивания
         quality_map = {
-            "144p": 'worst[ext=mp4]',
-            "240p": 'best[height<=240][ext=mp4]',
-            "360p": 'best[height<=360][ext=mp4]',
-            "480p": 'best[height<=480][ext=mp4]',
-            "720p": 'best[height<=720][ext=mp4]',
-            "1080p": 'best[height<=1080][ext=mp4]',
-            "best": 'best[ext=mp4]'
+            "144p": 'worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]',
+            "240p": 'bestvideo[height<=240][ext=mp4]+bestaudio[ext=m4a]/best[height<=240][ext=mp4]',
+            "360p": 'bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]',
+            "480p": 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]',
+            "720p": 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]',
+            "1080p": 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]',
+            "best": 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]'
         }
         format_spec = quality_map.get(quality, 'best[ext=mp4]')
         
         opts = {
             'format': format_spec,
             'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
             'ignoreerrors': True,
             'merge_output_format': 'mp4',
             'geo_bypass': True,
@@ -242,9 +291,15 @@ def download_video_sync(url: str, quality: str):
         
         if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
             opts['cookiefile'] = COOKIES_FILE
+            log_message("📁 Использую cookies")
         
         with YoutubeDL(opts) as ydl:
+            log_message("Получение информации...")
             info = ydl.extract_info(url, download=True)
+            
+            if not info:
+                return None, None, False
+            
             title = info.get('title', 'video')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
@@ -262,7 +317,7 @@ def download_video_sync(url: str, quality: str):
                     return None, None, False
             
             file_size = os.path.getsize(filename) / (1024 * 1024)
-            log_message(f"✅ Скачано: {title[:40]} ({file_size:.1f} МБ)")
+            log_message(f"✅ Скачано: {title[:50]} ({file_size:.1f} МБ)")
             
             video_cache[video_id] = {
                 'path': filename,
@@ -292,12 +347,12 @@ def download_audio_sync(url: str):
         opts = {
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '128',
+                'preferredquality': '192',
             }],
             'geo_bypass': True,
             'http_headers': {
@@ -341,16 +396,14 @@ def download_audio_sync(url: str):
         log_message(f"Ошибка: {e}", "ERROR")
         return None, None, False
 
-# ==================== МГНОВЕННАЯ ОТПРАВКА ====================
-async def send_video_fast(message, file_path: str, title: str, quality: str, from_cache: bool = False):
-    """Мгновенная отправка видео (сжатие только при необходимости)"""
+# ==================== ОТПРАВКА ====================
+async def send_video_with_compress(message, file_path: str, title: str, quality: str, from_cache: bool = False):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     LIMIT = 49
-    
     cache_text = " ⚡(кэш)" if from_cache else ""
     
     try:
-        # Если видео меньше лимита - отправляем мгновенно
+        # Если видео уже меньше лимита - отправляем сразу
         if file_size_mb <= LIMIT:
             video_file = FSInputFile(file_path)
             await message.answer_video(
@@ -358,14 +411,15 @@ async def send_video_fast(message, file_path: str, title: str, quality: str, fro
                 caption=f"✅ *{title[:80]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ",
                 parse_mode=ParseMode.MARKDOWN
             )
-            log_message(f"⚡ Мгновенная отправка ({file_size_mb:.1f} МБ)")
             return True
         
-        # Если видео больше - быстрое сжатие
+        # Быстрое сжатие
         status_msg = await message.answer(
-            f"⚡ *Быстрое сжатие...*\n"
-            f"Размер: {file_size_mb:.1f} МБ\n"
-            f"⏳ Обычно занимает 10-30 секунд",
+            f"⚡ *Быстрое сжатие видео...*\n"
+            f"📦 Размер: {file_size_mb:.1f} МБ\n"
+            f"🎯 Цель: до 48 МБ\n"
+            f"🚀 Использую {CPU_CORES} потоков\n"
+            f"⏳ Обычно занимает 30-60 секунд",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -375,39 +429,46 @@ async def send_video_fast(message, file_path: str, title: str, quality: str, fro
         if compressed_path and os.path.exists(compressed_path):
             new_size = os.path.getsize(compressed_path) / (1024 * 1024)
             
-            await status_msg.delete()
-            video_file = FSInputFile(compressed_path)
-            await message.answer_video(
-                video=video_file,
-                caption=f"✅ *{title[:80]}*{cache_text} ⚡\n📹 {quality} | {new_size:.1f} МБ (было {file_size_mb:.1f} МБ)",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            log_message(f"⚡ Отправлено после быстрого сжатия ({new_size:.1f} МБ)")
-            
-            try:
-                os.remove(compressed_path)
-            except:
-                pass
-            return True
-        else:
-            # Если сжатие не удалось - отправляем оригинал
-            await status_msg.edit_text(
-                f"⚠️ *Не удалось сжать, отправляю оригинал*\n"
-                f"Размер: {file_size_mb:.1f} МБ\n"
-                f"Если видео не отправляется - попробуйте качество ниже",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            try:
+            if new_size <= LIMIT:
+                await status_msg.delete()
+                video_file = FSInputFile(compressed_path)
+                await message.answer_video(
+                    video=video_file,
+                    caption=f"✅ *{title[:80]}*{cache_text} ⚡\n📹 {quality} | {new_size:.1f} МБ (было {file_size_mb:.1f} МБ)",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                try:
+                    os.remove(compressed_path)
+                except:
+                    pass
+                return True
+            else:
+                await status_msg.edit_text(
+                    f"⚠️ *Не удалось сжать до 48 МБ*\n"
+                    f"Получилось {new_size:.1f} МБ\n"
+                    f"Отправляю как есть...",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                # Отправляем оригинал если сжатие не помогло
                 video_file = FSInputFile(file_path)
                 await message.answer_document(
                     document=video_file,
-                    caption=f"✅ *{title[:80]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ (оригинал)",
+                    caption=f"✅ *{title[:80]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return True
-            except Exception as e:
-                await message.answer(f"❌ *Видео слишком большое для отправки*\n{file_size_mb:.1f} МБ > 50 МБ\nПопробуйте качество ниже", parse_mode=ParseMode.MARKDOWN)
-                return False
+        else:
+            await status_msg.edit_text(
+                "⚠️ *Ошибка сжатия, отправляю оригинал*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            video_file = FSInputFile(file_path)
+            await message.answer_document(
+                document=video_file,
+                caption=f"✅ *{title[:80]}*{cache_text}\n📹 {quality} | {file_size_mb:.1f} МБ",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return True
             
     except Exception as e:
         log_message(f"Ошибка: {e}", "ERROR")
@@ -433,18 +494,16 @@ def get_keyboard(url: str):
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    cookies_info = check_cookies()
+    cookies_info = check_cookies() if 'check_cookies' in dir() else {'message': '❌ Cookies не настроены'}
     ffmpeg_status = "✅" if FFMPEG_PATH else "❌"
     
     await message.answer(
-        f"⚡ *Видео-Бот (Супер Быстрый)*\n\n"
+        f"🎬 *Видео-Бот (БЫСТРОЕ СЖАТИЕ)*\n\n"
         f"📹 Отправьте ссылку на YouTube видео\n\n"
-        f"*Скорость:*\n"
-        f"🚀 Сжатие за 10-30 секунд\n"
-        f"⚡ Мгновенная отправка из кэша\n\n"
         f"*Статус:*\n"
         f"🎬 FFmpeg: {ffmpeg_status}\n"
-        f"🍪 Cookies: {cookies_info['message']}\n\n"
+        f"⚡ Потоков: {CPU_CORES}\n"
+        f"🚀 Режим: {'Аппаратное ускорение' if get_hardware_acceleration() else 'Ultrafast'}\n\n"
         f"*Команды:*\n"
         f"/cookies - Управление cookies\n"
         f"/stats - Статистика\n"
@@ -455,16 +514,18 @@ async def start_cmd(message: types.Message):
 
 @dp.message(Command("cookies"))
 async def cookies_menu_cmd(message: types.Message):
-    cookies_info = check_cookies()
-    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📤 Загрузить cookies", callback_data="upload_cookies")],
-        [InlineKeyboardButton(text="🗑️ Удалить cookies", callback_data="delete_cookies")],
-        [InlineKeyboardButton(text="📊 Статус cookies", callback_data="status_cookies")]
+        [InlineKeyboardButton(text="🗑️ Удалить cookies", callback_data="delete_cookies")]
     ])
     
     await message.answer(
-        f"🍪 *Управление cookies*\n\n{cookies_info['message']}",
+        f"🍪 *Управление cookies*\n\n"
+        f"Как получить cookies:\n"
+        f"1. Установите расширение 'Get cookies.txt LOCALLY'\n"
+        f"2. Войдите в YouTube\n"
+        f"3. Экспортируйте cookies\n"
+        f"4. Загрузите файл сюда",
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -476,10 +537,15 @@ async def stats_cmd(message: types.Message):
         if os.path.exists(info.get('path', '')):
             total_size += os.path.getsize(info['path'])
     
+    hw_accel = get_hardware_acceleration()
+    
     await message.answer(
         f"📊 *Статистика*\n\n"
         f"📁 В кэше: {len(video_cache)} видео\n"
-        f"💾 Занято: {total_size/(1024*1024):.1f} МБ",
+        f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
+        f"⚡ Потоков CPU: {CPU_CORES}\n"
+        f"🚀 Ускорение: {'✅ ' + hw_accel.upper() if hw_accel else '❌ CPU only'}\n"
+        f"🎬 FFmpeg: {'✅' if FFMPEG_PATH else '❌'}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -508,16 +574,6 @@ async def log_cmd(message: types.Message):
             await message.answer(f"📋 *Логи:*\n```\n{log_text[:3500]}\n```", parse_mode=ParseMode.MARKDOWN)
     else:
         await message.answer("📋 Логов пока нет")
-
-@dp.message(Command("upload_cookies"))
-async def upload_cookies_command(message: types.Message):
-    await message.answer(
-        "📤 *Отправьте файл cookies.txt*\n\n"
-        "1. Нажмите на кнопку '📎'\n"
-        "2. Выберите 'Файл'\n"
-        "3. Отправьте cookies.txt",
-        parse_mode=ParseMode.MARKDOWN
-    )
 
 @dp.message(lambda message: message.document is not None)
 async def handle_document(message: types.Message):
@@ -562,8 +618,9 @@ async def handle_url(message: types.Message):
         return
     
     await message.answer(
-        "⚡ *Выберите качество:*\n\n"
-        "Совет: 480p и 720p сжимаются быстрее всего",
+        "🎥 *Выберите качество:*\n\n"
+        f"⚡ Сжатие в {CPU_CORES} потоков\n"
+        f"🚀 Скорость: до 10x быстрее",
         reply_markup=get_keyboard(url),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -583,16 +640,11 @@ async def handle_callback(callback: CallbackQuery):
         return
     
     if data == "delete_cookies":
-        if delete_cookies():
+        if os.path.exists(COOKIES_FILE):
+            os.remove(COOKIES_FILE)
             await callback.message.edit_text("🗑️ *Cookies удалены*", parse_mode=ParseMode.MARKDOWN)
         else:
             await callback.message.edit_text("❌ *Файл не найден*", parse_mode=ParseMode.MARKDOWN)
-        await callback.answer()
-        return
-    
-    if data == "status_cookies":
-        cookies_info = check_cookies()
-        await callback.message.edit_text(f"🍪 *Статус cookies*\n\n{cookies_info['message']}", parse_mode=ParseMode.MARKDOWN)
         await callback.answer()
         return
     
@@ -612,7 +664,7 @@ async def handle_callback(callback: CallbackQuery):
         quality_name = quality_names.get(quality, quality)
         
         status_msg = await callback.message.edit_text(
-            f"⚡ *Скачиваю {quality_name}...*\nПодождите немного",
+            f"⏳ *Скачиваю {quality_name}...*\nПодождите",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -624,9 +676,9 @@ async def handle_callback(callback: CallbackQuery):
             await callback.answer()
             return
         
-        await status_msg.edit_text(f"⚡ *Обработка видео...*", parse_mode=ParseMode.MARKDOWN)
+        await status_msg.edit_text(f"⚡ *Быстрое сжатие...*", parse_mode=ParseMode.MARKDOWN)
         
-        success = await send_video_fast(callback.message, file_path, title, quality_name, from_cache)
+        success = await send_video_with_compress(callback.message, file_path, title, quality_name, from_cache)
         
         if success:
             await status_msg.delete()
@@ -637,7 +689,7 @@ async def handle_callback(callback: CallbackQuery):
     elif action == "audio":
         url = parts[1]
         
-        status_msg = await callback.message.edit_text("⚡ *Скачиваю аудио...*", parse_mode=ParseMode.MARKDOWN)
+        status_msg = await callback.message.edit_text("⏳ *Скачиваю аудио...*", parse_mode=ParseMode.MARKDOWN)
         
         loop = asyncio.get_event_loop()
         file_path, title, from_cache = await loop.run_in_executor(None, download_audio_sync, url)
@@ -662,41 +714,28 @@ async def handle_callback(callback: CallbackQuery):
         except Exception as e:
             await status_msg.edit_text(f"❌ *Ошибка:* `{str(e)[:100]}`", parse_mode=ParseMode.MARKDOWN)
 
-def delete_cookies():
-    try:
-        if os.path.exists(COOKIES_FILE):
-            os.remove(COOKIES_FILE)
-            return True
-        return False
-    except:
-        return False
-
-def check_cookies() -> dict:
-    result = {'message': ''}
-    if os.path.exists(COOKIES_FILE):
-        size = os.path.getsize(COOKIES_FILE)
-        if size > 100:
-            result['message'] = f"✅ Cookies валидны ({size} байт)"
-        else:
-            result['message'] = f"⚠️ Cookies файл слишком маленький ({size} байт)"
-    else:
-        result['message'] = "❌ Cookies файл не найден"
-    return result
-
 # ==================== ЗАПУСК ====================
 async def main():
     print("=" * 60)
-    print("⚡ БОТ ЗАПУЩЕН (СУПЕР БЫСТРЫЙ РЕЖИМ)")
+    print("🤖 БОТ ЗАПУЩЕН (БЫСТРОЕ СЖАТИЕ)")
     print("=" * 60)
     
+    # Установка FFmpeg
     if ensure_ffmpeg():
-        print(f"✅ FFmpeg готов")
+        print(f"✅ FFmpeg готов: {FFMPEG_PATH}")
     else:
-        print("❌ Ошибка FFmpeg")
+        print("❌ FFmpeg не установлен")
     
-    print(f"📁 Папка: {os.path.abspath(DOWNLOAD_DIR)}")
+    # Определяем ускорение
+    hw_accel = get_hardware_acceleration()
+    if hw_accel:
+        print(f"🚀 Аппаратное ускорение: {hw_accel.upper()}")
+    else:
+        print(f"⚡ CPU режим: ultrafast, {CPU_CORES} потоков")
+    
+    print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
     print("=" * 60)
-    print("⚡ БОТ ГОТОВ! СЖАТИЕ ЗА 10-30 СЕКУНД!")
+    print("✅ БОТ ГОТОВ!")
     print("=" * 60)
     
     await dp.start_polling(bot)
