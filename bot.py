@@ -31,67 +31,46 @@ for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
-# ==================== ОПРЕДЕЛЕНИЕ ПУТЕЙ ДЛЯ FFMPEG ====================
+# Глобальные пути к FFmpeg (устанавливаются при запуске)
+FFMPEG_PATH = None
+FFPROBE_PATH = None
+
+# ==================== ОПРЕДЕЛЕНИЕ ПУТЕЙ ====================
 def find_ffmpeg():
-    """Поиск ffmpeg в системе"""
+    """Поиск FFmpeg в системе и локальной папке"""
+    global FFMPEG_PATH, FFPROBE_PATH
+    
     # Список возможных путей
     possible_paths = [
-        # Локальная установка
-        os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffmpeg"),
+        # Локальная установка в папке tools
         os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffmpeg.exe"),
-        os.path.join(os.getcwd(), "ffmpeg", "ffmpeg"),
-        os.path.join(os.getcwd(), "ffmpeg", "ffmpeg.exe"),
-        # Системные пути Linux
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/bin/ffmpeg",
-        # Системные пути Windows
+        os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "ffmpeg.exe"),
+        # Системные пути
         "C:\\ffmpeg\\bin\\ffmpeg.exe",
         "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
-        # Через which/where
+        # В PATH
         shutil.which("ffmpeg"),
         shutil.which("ffmpeg.exe")
     ]
     
     for path in possible_paths:
         if path and os.path.exists(path):
-            # Даем права на выполнение
-            try:
-                os.chmod(path, 0o755)
-            except:
-                pass
-            return path
-    return None
-
-def find_ffprobe():
-    """Поиск ffprobe в системе"""
-    possible_paths = [
-        os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffprobe"),
-        os.path.join(os.getcwd(), TOOLS_DIR, "ffmpeg", "bin", "ffprobe.exe"),
-        "/usr/bin/ffprobe",
-        "/usr/local/bin/ffprobe",
-        "C:\\ffmpeg\\bin\\ffprobe.exe",
-        shutil.which("ffprobe"),
-        shutil.which("ffprobe.exe")
-    ]
+            FFMPEG_PATH = path
+            # Ищем ffprobe в той же папке
+            probe_path = os.path.join(os.path.dirname(path), "ffprobe.exe")
+            if os.path.exists(probe_path):
+                FFPROBE_PATH = probe_path
+            else:
+                FFPROBE_PATH = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+            return True
     
-    for path in possible_paths:
-        if path and os.path.exists(path):
-            try:
-                os.chmod(path, 0o755)
-            except:
-                pass
-            return path
-    return None
-
-def check_ffmpeg() -> bool:
-    """Проверка наличия FFmpeg"""
-    ffmpeg_path = find_ffmpeg()
-    if ffmpeg_path:
-        log_message(f"✅ FFmpeg найден: {ffmpeg_path}")
-        return True
-    log_message("❌ FFmpeg не найден")
     return False
+
+def get_ffmpeg_path():
+    return FFMPEG_PATH
+
+def get_ffprobe_path():
+    return FFPROBE_PATH
 
 # ==================== ЛОГИРОВАНИЕ ====================
 def log_message(msg: str, level: str = "INFO"):
@@ -123,44 +102,41 @@ def save_cache(cache):
 video_cache = load_cache()
 log_message(f"Загружено {len(video_cache)} записей")
 
-# ==================== УСТАНОВКА FFMPEG ====================
-def install_ffmpeg_linux():
-    """Установка FFmpeg на Linux"""
-    try:
-        log_message("🚀 Установка FFmpeg на Linux...")
-        # Пробуем apt-get (Debian/Ubuntu)
-        result = subprocess.run(['apt-get', 'update'], capture_output=True, timeout=60)
-        if result.returncode == 0:
-            subprocess.run(['apt-get', 'install', '-y', 'ffmpeg'], capture_output=True, timeout=120)
-            log_message("✅ FFmpeg установлен через apt")
-            return True
-        
-        # Пробуем yum (CentOS/RHEL)
-        result = subprocess.run(['yum', 'install', '-y', 'ffmpeg'], capture_output=True, timeout=120)
-        if result.returncode == 0:
-            log_message("✅ FFmpeg установлен через yum")
-            return True
-        
-        return False
-    except Exception as e:
-        log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
-        return False
+# ==================== АВТОМАТИЧЕСКАЯ УСТАНОВКА FFMPEG ДЛЯ WINDOWS ====================
+def check_ffmpeg() -> bool:
+    """Проверка наличия FFmpeg"""
+    return find_ffmpeg()
+
+def download_file_with_progress(url: str, dest: str):
+    """Скачивание файла"""
+    urllib.request.urlretrieve(url, dest)
+
+def add_to_path(directory: str):
+    """Добавление директории в PATH текущего процесса"""
+    os.environ['PATH'] = directory + os.pathsep + os.environ.get('PATH', '')
 
 def install_ffmpeg_windows():
-    """Установка FFmpeg на Windows"""
+    """Установка FFmpeg на Windows в папку tools"""
+    global FFMPEG_PATH, FFPROBE_PATH
+    
     try:
-        log_message("🚀 Установка FFmpeg на Windows...")
+        log_message("🚀 Установка FFmpeg для Windows...")
         
+        # URL для скачивания FFmpeg
         ffmpeg_url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
         zip_path = os.path.join(TOOLS_DIR, "ffmpeg.zip")
         extract_path = os.path.join(TOOLS_DIR, "ffmpeg_extract")
         
+        # Скачиваем
         log_message("📥 Скачивание FFmpeg...")
-        urllib.request.urlretrieve(ffmpeg_url, zip_path)
+        download_file_with_progress(ffmpeg_url, zip_path)
+        log_message("✅ Скачивание завершено")
         
-        log_message("📦 Распаковка...")
+        # Распаковываем
+        log_message("📦 Распаковка FFmpeg...")
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_path)
+        log_message("✅ Распаковка завершена")
         
         # Находим папку bin
         bin_path = None
@@ -170,44 +146,68 @@ def install_ffmpeg_windows():
                 break
         
         if not bin_path:
-            log_message("❌ Не найдена папка bin", "ERROR")
+            log_message("❌ Не найдена папка bin в архиве", "ERROR")
             return False
         
+        log_message(f"📁 Найдена папка bin: {bin_path}")
+        
+        # Создаем целевую папку
         target_bin_path = os.path.join(TOOLS_DIR, "ffmpeg", "bin")
         if os.path.exists(target_bin_path):
             shutil.rmtree(target_bin_path, ignore_errors=True)
         os.makedirs(target_bin_path, exist_ok=True)
         
+        # Копируем файлы
+        log_message("📋 Копирование файлов...")
         for file in os.listdir(bin_path):
             src = os.path.join(bin_path, file)
             dst = os.path.join(target_bin_path, file)
             shutil.copy2(src, dst)
+            # Даем права на выполнение
+            try:
+                os.chmod(dst, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+            except:
+                pass
         
+        # Очистка
+        log_message("🧹 Очистка временных файлов...")
         os.remove(zip_path)
         shutil.rmtree(extract_path, ignore_errors=True)
         
-        log_message("✅ FFmpeg установлен на Windows")
-        return True
+        # Добавляем в PATH
+        add_to_path(target_bin_path)
         
+        # Обновляем глобальные переменные
+        FFMPEG_PATH = os.path.join(target_bin_path, "ffmpeg.exe")
+        FFPROBE_PATH = os.path.join(target_bin_path, "ffprobe.exe")
+        
+        # Проверяем установку
+        if os.path.exists(FFMPEG_PATH):
+            log_message(f"✅ FFmpeg установлен: {FFMPEG_PATH}")
+            return True
+        else:
+            log_message("❌ FFmpeg не найден после установки", "ERROR")
+            return False
+            
     except Exception as e:
         log_message(f"Ошибка установки FFmpeg: {e}", "ERROR")
+        log_message(traceback.format_exc(), "ERROR")
         return False
 
 def install_ffmpeg():
-    """Установка FFmpeg в зависимости от ОС"""
+    """Установка FFmpeg"""
     system = platform.system()
     log_message(f"Операционная система: {system}")
     
     if system == "Windows":
         return install_ffmpeg_windows()
-    elif system == "Linux":
-        return install_ffmpeg_linux()
     else:
         log_message(f"⚠️ Автоустановка для {system} не поддерживается", "WARNING")
         return False
 
 # ==================== РАБОТА С COOKIES ====================
 def check_cookies() -> dict:
+    """Проверка наличия и валидности cookies файла"""
     result = {
         'exists': False,
         'size': 0,
@@ -231,6 +231,7 @@ def check_cookies() -> dict:
     return result
 
 def save_cookies_file(file_path: str) -> bool:
+    """Сохранение загруженного cookies файла"""
     try:
         shutil.copy2(file_path, COOKIES_FILE)
         if os.path.exists(COOKIES_FILE):
@@ -243,6 +244,7 @@ def save_cookies_file(file_path: str) -> bool:
         return False
 
 def delete_cookies():
+    """Удаление cookies файла"""
     try:
         if os.path.exists(COOKIES_FILE):
             os.remove(COOKIES_FILE)
@@ -255,8 +257,9 @@ def delete_cookies():
 
 # ==================== СЖАТИЕ ВИДЕО ====================
 def get_video_duration(file_path: str) -> float:
+    """Получение длительности видео с помощью ffprobe"""
     try:
-        ffprobe_path = find_ffprobe()
+        ffprobe_path = get_ffprobe_path()
         if not ffprobe_path:
             log_message("⚠️ ffprobe не найден", "WARNING")
             return 60.0
@@ -264,31 +267,52 @@ def get_video_duration(file_path: str) -> float:
         cmd = [ffprobe_path, '-v', 'error', '-show_entries', 'format=duration',
                '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
         
+        log_message(f"Выполнение команды: {' '.join(cmd)}")
+        
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-        return 60.0
+            duration = float(result.stdout.strip())
+            log_message(f"Длительность видео: {duration} сек")
+            return duration
+        else:
+            log_message(f"Ошибка ffprobe: {result.stderr[:200]}", "WARNING")
+            return 60.0
     except Exception as e:
         log_message(f"Ошибка получения длительности: {e}", "ERROR")
         return 60.0
 
 def compress_video(input_path: str, target_size_mb: int = 48) -> str:
+    """Сжатие видео до указанного размера"""
     try:
-        ffmpeg_path = find_ffmpeg()
+        ffmpeg_path = get_ffmpeg_path()
         if not ffmpeg_path:
             log_message("❌ FFmpeg не найден для сжатия", "ERROR")
             return None
         
+        # Проверяем существование файла
+        if not os.path.exists(input_path):
+            log_message(f"❌ Входной файл не найден: {input_path}", "ERROR")
+            return None
+        
+        # Получаем длительность
         duration = get_video_duration(input_path)
+        
+        # Рассчитываем битрейт для целевого размера
         target_bits = target_size_mb * 8 * 1024 * 1024
         video_bitrate = int(target_bits / duration)
-        video_bitrate = max(300000, min(video_bitrate, 2000000))
         
+        # Ограничиваем битрейт разумными значениями
+        min_bitrate = 300000  # 300 kbps
+        max_bitrate = 2000000  # 2 Mbps
+        video_bitrate = max(min_bitrate, min(video_bitrate, max_bitrate))
+        
+        # Выходной файл
         base_name = os.path.basename(input_path)
         name_without_ext = os.path.splitext(base_name)[0]
         output_path = os.path.join(COMPRESSED_DIR, f"{name_without_ext}_compressed.mp4")
         
+        # Команда сжатия
         cmd = [
             ffmpeg_path, '-i', input_path,
             '-b:v', f'{video_bitrate}',
@@ -300,25 +324,33 @@ def compress_video(input_path: str, target_size_mb: int = 48) -> str:
             '-y', output_path
         ]
         
-        log_message(f"Сжатие: битрейт {video_bitrate} bps")
+        log_message(f"Сжатие видео: {os.path.basename(input_path)}")
+        log_message(f"Длительность: {duration:.1f} сек, битрейт: {video_bitrate} bps")
+        log_message(f"Команда: {' '.join(cmd)}")
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         if result.returncode == 0 and os.path.exists(output_path):
+            original_size = os.path.getsize(input_path) / (1024 * 1024)
             new_size = os.path.getsize(output_path) / (1024 * 1024)
-            log_message(f"✅ Сжато: {new_size:.1f} МБ")
+            log_message(f"✅ Сжато: {original_size:.1f} МБ -> {new_size:.1f} МБ")
             return output_path
         else:
             if result.stderr:
-                log_message(f"Ошибка FFmpeg: {result.stderr[:200]}", "ERROR")
+                log_message(f"Ошибка FFmpeg: {result.stderr[:500]}", "ERROR")
             return None
             
+    except subprocess.TimeoutExpired:
+        log_message("❌ Таймаут сжатия видео (более 5 минут)", "ERROR")
+        return None
     except Exception as e:
         log_message(f"Ошибка сжатия: {e}", "ERROR")
+        log_message(traceback.format_exc(), "ERROR")
         return None
 
 # ==================== СКАЧИВАНИЕ ВИДЕО ====================
 def download_video_sync(url: str, quality: str):
+    """Скачивание видео с YouTube"""
     video_id = hashlib.md5(f"{url}_{quality}".encode()).hexdigest()
     
     if video_id in video_cache:
@@ -386,6 +418,7 @@ def download_video_sync(url: str, quality: str):
                 if mp4_files:
                     filename = max(mp4_files, key=os.path.getmtime)
                 else:
+                    log_message("❌ Файл не найден", "ERROR")
                     return None, None, False
             
             file_size = os.path.getsize(filename) / (1024 * 1024)
@@ -405,9 +438,11 @@ def download_video_sync(url: str, quality: str):
             
     except Exception as e:
         log_message(f"Ошибка: {e}", "ERROR")
+        log_message(traceback.format_exc(), "ERROR")
         return None, None, False
 
 def download_audio_sync(url: str):
+    """Скачивание аудио"""
     audio_id = hashlib.md5(f"{url}_audio".encode()).hexdigest()
     
     if audio_id in video_cache:
@@ -485,7 +520,7 @@ async def send_video_with_compress(message, file_path: str, title: str, quality:
             return True
         
         status_msg = await message.answer(
-            f"📦 *Сжимаю видео...*\nРазмер: {file_size_mb:.1f} МБ\n⏳ Подождите",
+            f"📦 *Сжимаю видео...*\nРазмер: {file_size_mb:.1f} МБ\n⏳ Подождите 2-3 минуты",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -500,7 +535,7 @@ async def send_video_with_compress(message, file_path: str, title: str, quality:
                 video_file = FSInputFile(compressed_path)
                 await message.answer_video(
                     video=video_file,
-                    caption=f"✅ *{title[:80]}*{cache_text} 🗜️\n📹 {quality} | {new_size:.1f} МБ",
+                    caption=f"✅ *{title[:80]}*{cache_text} 🗜️\n📹 {quality} | {new_size:.1f} МБ (было {file_size_mb:.1f} МБ)",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 try:
@@ -509,13 +544,22 @@ async def send_video_with_compress(message, file_path: str, title: str, quality:
                     pass
                 return True
             else:
-                await status_msg.edit_text("❌ *Не удалось сжать*", parse_mode=ParseMode.MARKDOWN)
+                await status_msg.edit_text(
+                    f"❌ *Не удалось сжать видео*\n"
+                    f"Получилось {new_size:.1f} МБ\n"
+                    f"Попробуйте качество ниже",
+                    parse_mode=ParseMode.MARKDOWN
+                )
                 return False
         else:
-            await status_msg.edit_text("❌ *Ошибка сжатия*", parse_mode=ParseMode.MARKDOWN)
+            await status_msg.edit_text(
+                "❌ *Ошибка сжатия*\n"
+                "Попробуйте выбрать качество ниже (720p или 480p)",
+                parse_mode=ParseMode.MARKDOWN
+            )
             return False
     except Exception as e:
-        log_message(f"Ошибка: {e}", "ERROR")
+        log_message(f"Ошибка отправки: {e}", "ERROR")
         await message.answer(f"❌ *Ошибка:* `{str(e)[:100]}`", parse_mode=ParseMode.MARKDOWN)
         return False
 
@@ -539,7 +583,7 @@ def get_keyboard(url: str):
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     cookies_info = check_cookies()
-    ffmpeg_status = "✅" if check_ffmpeg() else "❌"
+    ffmpeg_status = "✅" if get_ffmpeg_path() else "❌"
     
     await message.answer(
         f"🎬 *Видео-Бот*\n\n"
@@ -566,7 +610,13 @@ async def cookies_menu_cmd(message: types.Message):
     ])
     
     await message.answer(
-        f"🍪 *Управление cookies*\n\n{cookies_info['message']}",
+        f"🍪 *Управление cookies*\n\n"
+        f"{cookies_info['message']}\n\n"
+        f"Как получить cookies:\n"
+        f"1. Установите расширение 'Get cookies.txt LOCALLY'\n"
+        f"2. Войдите в YouTube\n"
+        f"3. Экспортируйте cookies\n"
+        f"4. Загрузите файл сюда",
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -579,11 +629,11 @@ async def stats_cmd(message: types.Message):
             total_size += os.path.getsize(info['path'])
     
     cookies_info = check_cookies()
-    ffmpeg_status = "✅" if check_ffmpeg() else "❌"
+    ffmpeg_status = "✅" if get_ffmpeg_path() else "❌"
     
     await message.answer(
         f"📊 *Статистика*\n\n"
-        f"📁 В кэше: {len(video_cache)}\n"
+        f"📁 В кэше: {len(video_cache)} видео\n"
         f"💾 Занято: {total_size/(1024*1024):.1f} МБ\n"
         f"🎬 FFmpeg: {ffmpeg_status}\n"
         f"🍪 Cookies: {cookies_info['message']}",
@@ -620,13 +670,13 @@ async def log_cmd(message: types.Message):
 async def upload_cookies_command(message: types.Message):
     await message.answer(
         "📤 *Отправьте файл cookies.txt*\n\n"
-        "1. Нажмите на кнопку '📎'\n"
+        "1. Нажмите на кнопку '📎' (скрепка)\n"
         "2. Выберите 'Файл'\n"
-        "3. Отправьте cookies.txt",
+        "3. Выберите ваш файл cookies.txt\n"
+        "4. Отправьте боту",
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ==================== ОБРАБОТКА ФАЙЛОВ ====================
 @dp.message(lambda message: message.document is not None)
 async def handle_document(message: types.Message):
     document = message.document
@@ -634,7 +684,7 @@ async def handle_document(message: types.Message):
     
     if file_name == "cookies.txt" or file_name.endswith(".txt"):
         try:
-            status_msg = await message.answer("⏳ *Загрузка cookies...*", parse_mode=ParseMode.MARKDOWN)
+            status_msg = await message.answer("⏳ *Загрузка cookies файла...*", parse_mode=ParseMode.MARKDOWN)
             
             file = await bot.get_file(document.file_id)
             downloaded_file = await bot.download_file(file.file_path)
@@ -645,23 +695,35 @@ async def handle_document(message: types.Message):
             
             file_size = os.path.getsize(temp_path)
             if file_size < 100:
-                await status_msg.edit_text(f"❌ *Файл слишком маленький* ({file_size} байт)", parse_mode=ParseMode.MARKDOWN)
+                await status_msg.edit_text(
+                    f"❌ *Файл слишком маленький*\nРазмер: {file_size} байт\nНужно минимум 100 байт.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
                 os.remove(temp_path)
                 return
             
             shutil.copy2(temp_path, COOKIES_FILE)
             os.remove(temp_path)
             
-            await status_msg.edit_text(f"✅ *Cookies загружены!* ({file_size} байт)", parse_mode=ParseMode.MARKDOWN)
-            log_message(f"✅ Cookies загружены пользователем {message.from_user.id}")
-            
+            if os.path.exists(COOKIES_FILE):
+                final_size = os.path.getsize(COOKIES_FILE)
+                await status_msg.edit_text(
+                    f"✅ *Cookies успешно загружены!*\n\n📊 Размер: {final_size} байт",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                log_message(f"✅ Cookies загружены пользователем {message.from_user.id}")
+            else:
+                await status_msg.edit_text("❌ *Ошибка сохранения cookies*", parse_mode=ParseMode.MARKDOWN)
+                
         except Exception as e:
-            log_message(f"Ошибка: {e}", "ERROR")
+            log_message(f"Ошибка загрузки cookies: {e}", "ERROR")
             await message.answer(f"❌ *Ошибка:* `{str(e)[:100]}`", parse_mode=ParseMode.MARKDOWN)
     else:
-        await message.answer("❌ *Отправьте файл cookies.txt*", parse_mode=ParseMode.MARKDOWN)
+        await message.answer(
+            "❌ *Неверный файл*\n\nОтправьте файл с именем `cookies.txt`",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
-# ==================== ОБРАБОТКА ССЫЛОК ====================
 @dp.message()
 async def handle_url(message: types.Message):
     url = message.text.strip()
@@ -677,7 +739,6 @@ async def handle_url(message: types.Message):
         parse_mode=ParseMode.MARKDOWN
     )
 
-# ==================== ОБРАБОТКА КНОПОК ====================
 @dp.callback_query()
 async def handle_callback(callback: CallbackQuery):
     data = callback.data
@@ -689,7 +750,7 @@ async def handle_callback(callback: CallbackQuery):
     
     if data == "upload_cookies":
         await callback.message.edit_text(
-            "📤 *Отправьте файл cookies.txt* в этот чат",
+            "📤 *Загрузите cookies файл*\n\nПросто отправьте файл `cookies.txt` в этот чат.",
             parse_mode=ParseMode.MARKDOWN
         )
         await callback.answer()
@@ -699,13 +760,16 @@ async def handle_callback(callback: CallbackQuery):
         if delete_cookies():
             await callback.message.edit_text("🗑️ *Cookies удалены*", parse_mode=ParseMode.MARKDOWN)
         else:
-            await callback.message.edit_text("❌ *Файл не найден*", parse_mode=ParseMode.MARKDOWN)
+            await callback.message.edit_text("❌ *Файл cookies не найден*", parse_mode=ParseMode.MARKDOWN)
         await callback.answer()
         return
     
     if data == "status_cookies":
         cookies_info = check_cookies()
-        await callback.message.edit_text(f"🍪 *Статус:*\n{cookies_info['message']}", parse_mode=ParseMode.MARKDOWN)
+        await callback.message.edit_text(
+            f"🍪 *Статус cookies*\n\n{cookies_info['message']}",
+            parse_mode=ParseMode.MARKDOWN
+        )
         await callback.answer()
         return
     
@@ -727,7 +791,7 @@ async def handle_callback(callback: CallbackQuery):
         quality_name = quality_names.get(quality, quality)
         
         status_msg = await callback.message.edit_text(
-            f"⏳ *Скачиваю {quality_name}...*\nПодождите",
+            f"⏳ *Скачиваю {quality_name}...*\nПодождите 1-2 минуты",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -736,7 +800,7 @@ async def handle_callback(callback: CallbackQuery):
         
         if not file_path:
             await status_msg.edit_text(
-                "❌ *Ошибка скачивания*\nПроверьте cookies: /cookies",
+                "❌ *Ошибка скачивания*\n\nПроверьте cookies командой /cookies",
                 parse_mode=ParseMode.MARKDOWN
             )
             await callback.answer()
@@ -755,7 +819,10 @@ async def handle_callback(callback: CallbackQuery):
     elif action == "audio":
         url = parts[1]
         
-        status_msg = await callback.message.edit_text("⏳ *Скачиваю аудио...*", parse_mode=ParseMode.MARKDOWN)
+        status_msg = await callback.message.edit_text(
+            "⏳ *Скачиваю аудио...*",
+            parse_mode=ParseMode.MARKDOWN
+        )
         
         loop = asyncio.get_event_loop()
         file_path, title, from_cache = await loop.run_in_executor(None, download_audio_sync, url)
@@ -784,26 +851,30 @@ async def handle_callback(callback: CallbackQuery):
 async def main():
     print("=" * 60)
     print("🤖 БОТ ЗАПУЩЕН")
-    print(f"🖥️ ОС: {platform.system()}")
+    print(f"🖥️ Операционная система: {platform.system()}")
     print("=" * 60)
     
-    # Проверка и установка FFmpeg
+    # Автоматическая установка FFmpeg
     if not check_ffmpeg():
-        print("⚠️ FFmpeg не найден, устанавливаю...")
-        if install_ffmpeg():
-            print("✅ FFmpeg установлен!")
+        print("⚠️ FFmpeg не найден, начинаю автоматическую установку...")
+        success = install_ffmpeg()
+        if success:
+            print("✅ FFmpeg успешно установлен!")
+            print(f"📁 Путь: {get_ffmpeg_path()}")
         else:
-            print("❌ Ошибка установки FFmpeg")
+            print("❌ Не удалось установить FFmpeg автоматически")
     else:
-        print(f"✅ FFmpeg готов: {find_ffmpeg()}")
+        print(f"✅ FFmpeg найден: {get_ffmpeg_path()}")
     
     # Проверка cookies
     cookies_info = check_cookies()
     print(f"🍪 {cookies_info['message']}")
     
-    print(f"📁 Папка: {os.path.abspath(DOWNLOAD_DIR)}")
+    print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
+    print(f"📁 Папка инструментов: {os.path.abspath(TOOLS_DIR)}")
     print("=" * 60)
-    print("✅ БОТ ГОТОВ!")
+    print("✅ БОТ ГОТОВ К РАБОТЕ!")
+    print("📤 Отправьте файл cookies.txt в бота для обхода блокировки YouTube")
     print("=" * 60)
     
     await dp.start_polling(bot)
