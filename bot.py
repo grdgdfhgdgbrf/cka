@@ -9,8 +9,7 @@ import shutil
 import urllib.request
 import zipfile
 import platform
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -19,7 +18,9 @@ from yt_dlp import YoutubeDL
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "7827714466:AAHzDGe1vXLkFksfxmIHNO67SOxfDsgJVtI"
-ADMIN_ID = 5356400377  # Ваш Telegram ID для админ-панели
+
+# ID администратора (замените на свой Telegram ID)
+ADMIN_IDS = [5356400377]  # Добавьте сюда ваш ID
 
 DOWNLOAD_DIR = "downloads"
 COMPRESSED_DIR = "compressed"
@@ -27,6 +28,7 @@ CACHE_FILE = "video_cache.json"
 LOG_FILE = "bot_log.txt"
 TOOLS_DIR = "tools"
 COOKIES_FILE = "cookies.txt"
+STATS_FILE = "stats.json"
 
 for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
     if not os.path.exists(dir_name):
@@ -34,6 +36,25 @@ for dir_name in [DOWNLOAD_DIR, COMPRESSED_DIR, TOOLS_DIR]:
 
 FFMPEG_PATH = None
 FFPROBE_PATH = None
+
+# ==================== СТАТИСТИКА ====================
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return {'total_users': 0, 'total_downloads': 0, 'total_size_mb': 0}
+
+def save_stats(stats):
+    try:
+        with open(STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+stats = load_stats()
 
 # ==================== ЛОГИРОВАНИЕ ====================
 def log_message(msg: str, level: str = "INFO"):
@@ -63,6 +84,7 @@ def save_cache(cache):
         pass
 
 video_cache = load_cache()
+log_message(f"📦 Загружено {len(video_cache)} записей кэша")
 
 # ==================== УСТАНОВКА FFMPEG ====================
 def check_ffmpeg():
@@ -74,6 +96,7 @@ def check_ffmpeg():
     if system_ffmpeg and system_ffprobe:
         FFMPEG_PATH = system_ffmpeg
         FFPROBE_PATH = system_ffprobe
+        log_message(f"✅ FFmpeg найден: {FFMPEG_PATH}")
         return True
     
     local_ffmpeg = os.path.join(TOOLS_DIR, "ffmpeg", "bin", "ffmpeg")
@@ -84,24 +107,30 @@ def check_ffmpeg():
         FFPROBE_PATH = local_ffprobe
         os.chmod(FFMPEG_PATH, 0o755)
         os.chmod(FFPROBE_PATH, 0o755)
+        log_message("✅ FFmpeg найден локально")
         return True
     
+    log_message("❌ FFmpeg не найден", "WARNING")
     return False
 
-def install_ffmpeg():
+def install_ffmpeg_linux():
     try:
+        log_message("🚀 Установка FFmpeg...")
         subprocess.run(['apt-get', 'update'], capture_output=True, timeout=60)
         subprocess.run(['apt-get', 'install', '-y', 'ffmpeg'], capture_output=True, timeout=120)
         return check_ffmpeg()
-    except:
+    except Exception as e:
+        log_message(f"Ошибка установки: {e}", "ERROR")
         return False
 
 def ensure_ffmpeg():
     if check_ffmpeg():
         return True
-    return install_ffmpeg()
+    if install_ffmpeg_linux():
+        return True
+    return False
 
-# ==================== БЫСТРОЕ СЖАТИЕ ====================
+# ==================== СЖАТИЕ ВИДЕО ====================
 def compress_video_fast(input_path: str, target_size_mb: int = 48) -> str:
     global FFMPEG_PATH
     
@@ -112,20 +141,20 @@ def compress_video_fast(input_path: str, target_size_mb: int = 48) -> str:
         original_size = os.path.getsize(input_path) / (1024 * 1024)
         
         if original_size <= target_size_mb:
+            log_message(f"✅ Видео уже {original_size:.1f} МБ, сжатие не требуется")
             return input_path
         
         # Получаем длительность
-        duration_cmd = [FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration',
+        cmd_duration = [FFPROBE_PATH, '-v', 'error', '-show_entries', 'format=duration',
                         '-of', 'default=noprint_wrappers=1:nokey=1', input_path]
-        result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(cmd_duration, capture_output=True, text=True, timeout=10)
         duration = float(result.stdout.strip()) if result.stdout else 60
         
         # Рассчитываем битрейт
         target_bits = target_size_mb * 8 * 1024 * 1024
         video_bitrate = int(target_bits / duration)
-        video_bitrate = max(500000, min(video_bitrate, 2000000))
+        video_bitrate = max(500000, min(video_bitrate, 2500000))
         
-        # Выходной файл
         base_name = os.path.basename(input_path)
         name_without_ext = os.path.splitext(base_name)[0]
         output_path = os.path.join(COMPRESSED_DIR, f"{name_without_ext}_compressed.mp4")
@@ -134,17 +163,24 @@ def compress_video_fast(input_path: str, target_size_mb: int = 48) -> str:
         cmd = [
             FFMPEG_PATH, '-i', input_path,
             '-c:v', 'libx264',
-            '-preset', 'ultrafast',
+            '-preset', 'veryfast',
             '-b:v', f'{video_bitrate}',
+            '-maxrate', f'{int(video_bitrate * 1.5)}',
+            '-bufsize', f'{video_bitrate * 2}',
             '-c:a', 'aac',
             '-b:a', '128k',
             '-movflags', '+faststart',
+            '-threads', '2',
             '-y', output_path
         ]
         
-        subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        log_message(f"🗜️ Сжатие: {original_size:.1f} МБ -> {target_size_mb} МБ")
         
-        if os.path.exists(output_path):
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            new_size = os.path.getsize(output_path) / (1024 * 1024)
+            log_message(f"✅ Сжато: {original_size:.1f} МБ -> {new_size:.1f} МБ")
             return output_path
         return None
             
@@ -156,46 +192,47 @@ def compress_video_fast(input_path: str, target_size_mb: int = 48) -> str:
 def download_video_sync(url: str, quality: str):
     video_id = hashlib.md5(f"{url}_{quality}".encode()).hexdigest()
     
-    if video_id in video_cache and os.path.exists(video_cache[video_id]['path']):
+    if video_id in video_cache:
         cached = video_cache[video_id]
-        return cached['path'], cached['title'], True
+        if os.path.exists(cached['path']):
+            log_message(f"📦 Из кэша: {cached['title'][:40]}")
+            return cached['path'], cached['title'], True
+    
+    # Соответствие качества формату
+    quality_formats = {
+        "144": 'worst[height<=144]',
+        "240": 'best[height<=240]',
+        "360": 'best[height<=360]',
+        "480": 'best[height<=480]',
+        "720": 'best[height<=720]',
+        "1080": 'best[height<=1080]',
+        "best": 'best'
+    }
+    format_spec = quality_formats.get(quality, 'best[height<=720]')
+    
+    opts = {
+        'format': format_spec,
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,
+        'merge_output_format': 'mp4',
+        'geo_bypass': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }
+    }
+    
+    if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
+        opts['cookiefile'] = COOKIES_FILE
     
     try:
-        # Правильные форматы для каждого качества
-        quality_formats = {
-            "144p": 'worstvideo[height<=144]+worstaudio/best[height<=144]',
-            "240p": 'best[height<=240]',
-            "360p": 'best[height<=360]',
-            "480p": 'best[height<=480]',
-            "720p": 'best[height<=720]',
-            "1080p": 'best[height<=1080]',
-            "best": 'best'
-        }
-        
-        format_spec = quality_formats.get(quality, 'best[height<=720]')
-        
-        opts = {
-            'format': format_spec,
-            'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'merge_output_format': 'mp4',
-            'geo_bypass': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            }
-        }
-        
-        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
-            opts['cookiefile'] = COOKIES_FILE
-        
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
-            # Находим файл
+            # Поиск файла
             filename = None
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.endswith('.mp4') and title in f:
@@ -209,49 +246,53 @@ def download_video_sync(url: str, quality: str):
                 else:
                     return None, None, False
             
+            file_size = os.path.getsize(filename) / (1024 * 1024)
+            log_message(f"✅ Скачано: {title[:40]} ({file_size:.1f} МБ)")
+            
             video_cache[video_id] = {
                 'path': filename,
                 'title': title,
                 'quality': quality,
                 'url': url,
                 'date': datetime.now().isoformat(),
-                'size_mb': os.path.getsize(filename) / (1024 * 1024)
+                'size_mb': file_size
             }
             save_cache(video_cache)
             
             return filename, title, False
             
     except Exception as e:
-        log_message(f"Ошибка: {e}", "ERROR")
+        log_message(f"❌ Ошибка: {e}", "ERROR")
         return None, None, False
 
 def download_audio_sync(url: str):
     audio_id = hashlib.md5(f"{url}_audio".encode()).hexdigest()
     
-    if audio_id in video_cache and os.path.exists(video_cache[audio_id]['path']):
+    if audio_id in video_cache:
         cached = video_cache[audio_id]
-        return cached['path'], cached['title'], True
+        if os.path.exists(cached['path']):
+            return cached['path'], cached['title'], True
+    
+    opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'geo_bypass': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }
+    }
+    
+    if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
+        opts['cookiefile'] = COOKIES_FILE
     
     try:
-        opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'geo_bypass': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            }
-        }
-        
-        if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
-            opts['cookiefile'] = COOKIES_FILE
-        
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'audio')
@@ -289,7 +330,6 @@ def download_audio_sync(url: str):
 async def send_video(message, file_path: str, title: str, quality: str, from_cache: bool = False):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     LIMIT = 49
-    
     cache_icon = "📦" if from_cache else "🆕"
     
     try:
@@ -297,27 +337,21 @@ async def send_video(message, file_path: str, title: str, quality: str, from_cac
             video_file = FSInputFile(file_path)
             await message.answer_video(
                 video=video_file,
-                caption=f"✅ *{title[:60]}*\n\n"
-                       f"{cache_icon} *Источник:* {'Кэш' if from_cache else 'Новое скачивание'}\n"
-                       f"🎬 *Качество:* {quality}\n"
-                       f"💾 *Размер:* {file_size_mb:.1f} МБ",
+                caption=f"✅ *{title[:60]}*\n\n{cache_icon} Качество: `{quality}p`\n💾 Размер: `{file_size_mb:.1f} МБ`",
                 parse_mode=ParseMode.MARKDOWN
             )
             return True
         
-        # Сжатие
         status_msg = await message.answer(
-            f"🔄 *Сжимаю видео...*\n\n"
-            f"📊 *Исходный размер:* {file_size_mb:.1f} МБ\n"
-            f"🎯 *Цель:* до 48 МБ\n"
-            f"⏱️ *Время:* ~30-60 секунд\n\n"
-            f"_Пожалуйста, подождите..._",
+            f"🔄 *Сжатие видео*\n\n"
+            f"📊 Исходный размер: `{file_size_mb:.1f} МБ`\n"
+            f"🎯 Целевой размер: `< 50 МБ`\n"
+            f"⏳ Пожалуйста, подождите...",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        compressed_path = await asyncio.get_event_loop().run_in_executor(
-            None, compress_video_fast, file_path, 48
-        )
+        loop = asyncio.get_event_loop()
+        compressed_path = await loop.run_in_executor(None, compress_video_fast, file_path, 48)
         
         if compressed_path and os.path.exists(compressed_path):
             new_size = os.path.getsize(compressed_path) / (1024 * 1024)
@@ -327,10 +361,7 @@ async def send_video(message, file_path: str, title: str, quality: str, from_cac
                 video_file = FSInputFile(compressed_path)
                 await message.answer_video(
                     video=video_file,
-                    caption=f"✅ *{title[:60]}*\n\n"
-                           f"🗜️ *Сжато:* {file_size_mb:.1f} МБ → {new_size:.1f} МБ\n"
-                           f"🎬 *Качество:* {quality}\n"
-                           f"⚡ *Экономия:* {file_size_mb - new_size:.1f} МБ",
+                    caption=f"✅ *{title[:60]}*\n\n{cache_icon} Качество: `{quality}p`\n🗜️ Сжато: `{file_size_mb:.1f} МБ` → `{new_size:.1f} МБ`",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 try:
@@ -341,15 +372,15 @@ async def send_video(message, file_path: str, title: str, quality: str, from_cac
             else:
                 await status_msg.edit_text(
                     f"⚠️ *Не удалось сжать видео*\n\n"
-                    f"📊 *Размер после сжатия:* {new_size:.1f} МБ\n"
-                    f"💡 *Совет:* Выберите качество ниже (720p или 480p)",
+                    f"📊 Размер после сжатия: `{new_size:.1f} МБ`\n"
+                    f"💡 Попробуйте выбрать качество ниже",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return False
         else:
             await status_msg.edit_text(
                 f"❌ *Ошибка сжатия*\n\n"
-                f"💡 Попробуйте выбрать качество ниже или повторите позже.",
+                f"💡 Попробуйте выбрать качество ниже или повторите позже",
                 parse_mode=ParseMode.MARKDOWN
             )
             return False
@@ -359,73 +390,76 @@ async def send_video(message, file_path: str, title: str, quality: str, from_cac
         await message.answer(f"❌ *Ошибка:* `{str(e)[:100]}`", parse_mode=ParseMode.MARKDOWN)
         return False
 
-# ==================== КЛАВИАТУРЫ ====================
-def get_quality_keyboard(url: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📱 144p", callback_data=f"vid_144p_{url}"),
-            InlineKeyboardButton(text="📱 240p", callback_data=f"vid_240p_{url}"),
-            InlineKeyboardButton(text="📱 360p", callback_data=f"vid_360p_{url}")
-        ],
-        [
-            InlineKeyboardButton(text="📺 480p", callback_data=f"vid_480p_{url}"),
-            InlineKeyboardButton(text="📺 720p", callback_data=f"vid_720p_{url}"),
-            InlineKeyboardButton(text="📺 1080p", callback_data=f"vid_1080p_{url}")
-        ],
-        [
-            InlineKeyboardButton(text="🏆 Лучшее", callback_data=f"vid_best_{url}"),
-            InlineKeyboardButton(text="🎵 MP3 (аудио)", callback_data=f"audio_{url}")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
-        ]
-    ])
+# ==================== АДМИН-ПАНЕЛЬ ====================
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 def get_admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-            InlineKeyboardButton(text="💾 Кэш", callback_data="admin_cache")
-        ],
-        [
-            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast"),
-            InlineKeyboardButton(text="📋 Логи", callback_data="admin_logs")
-        ],
-        [
-            InlineKeyboardButton(text="🗑️ Очистить кэш", callback_data="admin_clear_cache"),
-            InlineKeyboardButton(text="🔄 Обновить статус", callback_data="admin_status")
-        ],
-        [
-            InlineKeyboardButton(text="❌ Закрыть", callback_data="admin_close")
-        ]
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+         InlineKeyboardButton(text="🗑️ Очистить кэш", callback_data="admin_clear_cache")],
+        [InlineKeyboardButton(text="📦 Размер кэша", callback_data="admin_cache_size"),
+         InlineKeyboardButton(text="🔄 Перезапустить", callback_data="admin_restart")],
+        [InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_broadcast"),
+         InlineKeyboardButton(text="📋 Логи", callback_data="admin_logs")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="admin_close")]
     ])
 
-# ==================== БОТ ====================
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+async def send_admin_panel(message: types.Message):
+    keyboard = get_admin_keyboard()
+    await message.answer(
+        f"👑 *Админ-панель*\n\n"
+        f"Добро пожаловать в панель управления ботом!\n\n"
+        f"📊 *Статистика:*\n"
+        f"• Пользователей: `{stats['total_users']}`\n"
+        f"• Скачиваний: `{stats['total_downloads']}`\n"
+        f"• Скачано: `{stats['total_size_mb']:.1f} МБ`\n"
+        f"• В кэше: `{len(video_cache)}` файлов",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-# ==================== ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ ====================
+# ==================== КЛАВИАТУРА ВЫБОРА КАЧЕСТВА ====================
+def get_quality_keyboard(url: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎬 144p", callback_data=f"vid_144_{url}"),
+         InlineKeyboardButton(text="🎬 240p", callback_data=f"vid_240_{url}"),
+         InlineKeyboardButton(text="🎬 360p", callback_data=f"vid_360_{url}")],
+        [InlineKeyboardButton(text="🎬 480p", callback_data=f"vid_480_{url}"),
+         InlineKeyboardButton(text="🎬 720p", callback_data=f"vid_720_{url}"),
+         InlineKeyboardButton(text="🎬 1080p", callback_data=f"vid_1080_{url}")],
+        [InlineKeyboardButton(text="🏆 Лучшее", callback_data=f"vid_best_{url}"),
+         InlineKeyboardButton(text="🎵 MP3 (аудио)", callback_data=f"audio_{url}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+    ])
+
+# ==================== КОМАНДЫ ====================
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    user_name = message.from_user.first_name or "Пользователь"
+    user_id = message.from_user.id
+    
+    # Обновляем статистику
+    if user_id not in stats.get('users', []):
+        stats['users'] = stats.get('users', [])
+        stats['users'].append(user_id)
+        stats['total_users'] = len(stats['users'])
+        save_stats(stats)
+    
+    cookies_status = "✅" if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100 else "❌"
+    ffmpeg_status = "✅" if FFMPEG_PATH else "❌"
     
     await message.answer(
-        f"🎬 *Привет, {user_name}!*\n\n"
-        f"Я бот для скачивания видео с YouTube.\n\n"
+        f"🎬 *VideoBot - Скачивание видео*\n\n"
+        f"Привет, {message.from_user.first_name}! 👋\n\n"
+        f"Я помогу скачать видео с YouTube в любом качестве!\n\n"
         f"📹 *Как пользоваться:*\n"
-        f"1️⃣ Отправь мне ссылку на YouTube видео\n"
-        f"2️⃣ Выбери нужное качество\n"
-        f"3️⃣ Получи видео или аудио\n\n"
-        f"⚡ *Особенности:*\n"
-        f"• Автоматическое сжатие видео >50 МБ\n"
-        f"• Кэширование для быстрой отправки\n"
-        f"• Поддержка MP3 аудио\n\n"
-        f"🔧 *Команды:*\n"
-        f"/start - Главное меню\n"
-        f"/help - Помощь\n"
-        f"/stats - Статистика\n"
-        f"/cookies - Загрузить cookies\n\n"
-        f"_Для администратора есть панель управления_ 👑",
+        f"• Просто отправьте мне ссылку на видео\n"
+        f"• Выберите нужное качество\n"
+        f"• Получите готовый файл\n\n"
+        f"⚙️ *Статус:*\n"
+        f"• FFmpeg: {ffmpeg_status}\n"
+        f"• Cookies: {cookies_status}\n\n"
+        f"💡 *Совет:* Если видео не скачивается, используйте команду /cookies",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -433,52 +467,56 @@ async def start_cmd(message: types.Message):
 async def help_cmd(message: types.Message):
     await message.answer(
         f"📖 *Помощь*\n\n"
-        f"🎯 *Как скачать видео:*\n"
-        f"• Отправьте ссылку на YouTube\n"
-        f"• Выберите качество из меню\n"
-        f"• Дождитесь скачивания и отправки\n\n"
-        f"🎵 *Как скачать аудио:*\n"
-        f"• Отправьте ссылку\n"
-        f"• Выберите MP3\n"
-        f"• Получите аудиофайл\n\n"
-        f"⚡ *Если видео >50 МБ:*\n"
-        f"• Автоматически сжимается\n"
-        f"• Сохраняется качество\n\n"
-        f"🍪 *Если видео не скачивается:*\n"
-        f"• Используйте команду /cookies\n"
-        f"• Загрузите файл cookies.txt\n\n"
-        f"📊 *Статистика:* /stats\n"
-        f"🗑️ *Очистить кэш:* /clear",
+        f"🔹 *Как скачать видео:*\n"
+        f"1. Скопируйте ссылку с YouTube\n"
+        f"2. Отправьте её боту\n"
+        f"3. Выберите качество\n"
+        f"4. Дождитесь обработки\n\n"
+        f"🔹 *Доступные команды:*\n"
+        f"/start - Главное меню\n"
+        f"/help - Эта справка\n"
+        f"/cookies - Загрузить cookies\n"
+        f"/stats - Статистика\n"
+        f"/clear - Очистить кэш\n"
+        f"/admin - Админ-панель (только для админов)\n\n"
+        f"🔹 *Поддерживаемые качества:*\n"
+        f"144p, 240p, 360p, 480p, 720p, 1080p, Лучшее\n\n"
+        f"🔹 *Ограничения:*\n"
+        f"• Максимальный размер видео: 50 МБ\n"
+        f"• Большие видео автоматически сжимаются",
         parse_mode=ParseMode.MARKDOWN
+    )
+
+@dp.message(Command("cookies"))
+async def cookies_cmd(message: types.Message):
+    await message.answer(
+        f"🍪 *Инструкция по получению cookies*\n\n"
+        f"📌 *Шаг 1:* Установите расширение\n"
+        f"Chrome: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)\n\n"
+        f"📌 *Шаг 2:* Войдите в YouTube\n\n"
+        f"📌 *Шаг 3:* Нажмите на иконку расширения и выберите 'Export cookies'\n\n"
+        f"📌 *Шаг 4:* Отправьте полученный файл сюда\n\n"
+        f"📤 *Просто отправьте файл cookies.txt боту*",
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True
     )
 
 @dp.message(Command("stats"))
 async def stats_cmd(message: types.Message):
     total_size = 0
-    videos_count = 0
-    audio_count = 0
-    
     for info in video_cache.values():
         if os.path.exists(info.get('path', '')):
             total_size += os.path.getsize(info['path'])
-            if info.get('type') == 'audio':
-                audio_count += 1
-            else:
-                videos_count += 1
-    
-    size_mb = total_size / (1024 * 1024)
-    size_gb = size_mb / 1024
     
     await message.answer(
         f"📊 *Статистика бота*\n\n"
-        f"🎬 *Видео в кэше:* {videos_count}\n"
-        f"🎵 *Аудио в кэше:* {audio_count}\n"
-        f"💾 *Всего в кэше:* {videos_count + audio_count}\n\n"
-        f"📦 *Занято места:*\n"
-        f"• {size_mb:.1f} МБ\n"
-        f"• {size_gb:.2f} ГБ\n\n"
-        f"⚡ *FFmpeg:* {'✅' if check_ffmpeg() else '❌'}\n"
-        f"🍪 *Cookies:* {'✅' if os.path.exists(COOKIES_FILE) else '❌'}",
+        f"👥 Пользователей: `{stats.get('total_users', 0)}`\n"
+        f"📥 Всего скачиваний: `{stats.get('total_downloads', 0)}`\n"
+        f"💾 Скачано данных: `{stats.get('total_size_mb', 0):.1f} МБ`\n"
+        f"📦 В кэше: `{len(video_cache)}` видео\n"
+        f"💿 Занято кэшем: `{total_size/(1024*1024):.1f} МБ`\n"
+        f"🎬 FFmpeg: `{'✅' if FFMPEG_PATH else '❌'}`\n"
+        f"🍪 Cookies: `{'✅' if os.path.exists(COOKIES_FILE) else '❌'}`",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -486,57 +524,28 @@ async def stats_cmd(message: types.Message):
 async def clear_cmd(message: types.Message):
     global video_cache
     deleted = 0
-    size_freed = 0
-    
     for info in video_cache.values():
         if os.path.exists(info.get('path', '')):
             try:
-                size_freed += os.path.getsize(info['path'])
                 os.remove(info['path'])
                 deleted += 1
             except:
                 pass
-    
     video_cache = {}
     save_cache(video_cache)
-    
     await message.answer(
         f"🗑️ *Кэш очищен*\n\n"
-        f"📁 *Удалено файлов:* {deleted}\n"
-        f"💾 *Освобождено места:* {size_freed/(1024*1024):.1f} МБ",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-@dp.message(Command("cookies"))
-async def cookies_cmd(message: types.Message):
-    await message.answer(
-        f"🍪 *Загрузка cookies*\n\n"
-        f"Для обхода блокировки YouTube нужно загрузить файл cookies.txt\n\n"
-        f"📝 *Инструкция:*\n"
-        f"1️⃣ Установите расширение 'Get cookies.txt LOCALLY'\n"
-        f"2️⃣ Войдите в YouTube в браузере\n"
-        f"3️⃣ Нажмите на иконку расширения\n"
-        f"4️⃣ Выберите 'Export cookies'\n"
-        f"5️⃣ Отправьте полученный файл сюда\n\n"
-        f"📤 *Просто отправьте файл cookies.txt*",
+        f"Удалено файлов: `{deleted}`",
         parse_mode=ParseMode.MARKDOWN
     )
 
 @dp.message(Command("admin"))
 async def admin_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ *Доступ запрещен*", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    await message.answer(
-        f"👑 *Админ-панель*\n\n"
-        f"Добро пожаловать в панель управления ботом.\n\n"
-        f"Выберите действие:",
-        reply_markup=get_admin_keyboard(),
-        parse_mode=ParseMode.MARKDOWN
-    )
+    if is_admin(message.from_user.id):
+        await send_admin_panel(message)
+    else:
+        await message.answer("❌ У вас нет доступа к админ-панели", parse_mode=ParseMode.MARKDOWN)
 
-# ==================== ОБРАБОТКА ФАЙЛОВ ====================
 @dp.message(lambda message: message.document is not None)
 async def handle_document(message: types.Message):
     document = message.document
@@ -555,9 +564,8 @@ async def handle_document(message: types.Message):
             file_size = os.path.getsize(COOKIES_FILE)
             await status_msg.edit_text(
                 f"✅ *Cookies успешно загружены!*\n\n"
-                f"📊 *Размер:* {file_size} байт\n"
-                f"🍪 *Статус:* Активны\n\n"
-                f"Теперь YouTube видео должны скачиваться без проблем.",
+                f"📊 Размер: `{file_size} байт`\n"
+                f"🍪 Теперь YouTube видео будут скачиваться без проблем",
                 parse_mode=ParseMode.MARKDOWN
             )
             log_message(f"✅ Cookies загружены пользователем {message.from_user.id}")
@@ -567,33 +575,29 @@ async def handle_document(message: types.Message):
     else:
         await message.answer(
             f"❌ *Неверный файл*\n\n"
-            f"Отправьте файл с именем `cookies.txt`\n"
-            f"Используйте команду /cookies для инструкции.",
+            f"Пожалуйста, отправьте файл с именем `cookies.txt`\n"
+            f"Команда /cookies - инструкция по получению",
             parse_mode=ParseMode.MARKDOWN
         )
 
-# ==================== ОБРАБОТКА ССЫЛОК ====================
 @dp.message()
 async def handle_url(message: types.Message):
     url = message.text.strip()
+    log_message(f"Ссылка от {message.from_user.id}: {url[:100]}")
     
     if not (url.startswith("http://") or url.startswith("https://")):
         await message.answer(
-            f"❌ *Неверный формат*\n\n"
-            f"Пожалуйста, отправьте ссылку на YouTube видео.\n"
-            f"Пример: `https://youtu.be/...` или `https://www.youtube.com/...`",
+            f"❌ *Неверная ссылка*\n\n"
+            f"Пожалуйста, отправьте корректную ссылку на видео YouTube\n"
+            f"Пример: `https://youtu.be/...` или `https://www.youtube.com/watch?v=...`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
     
     await message.answer(
-        f"🎥 *Выберите качество*\n\n"
-        f"📹 Видео:\n"
-        f"• 144p-360p - для экономии трафика\n"
-        f"• 480p-720p - оптимальное качество\n"
-        f"• 1080p/Live - максимальное качество\n\n"
-        f"🎵 Аудио:\n"
-        f"• MP3 - только звук",
+        f"🎥 *Выберите качество видео*\n\n"
+        f"📹 Видео будет скачано в выбранном качестве\n"
+        f"⚡ Большие видео автоматически сжимаются до 50 МБ",
         reply_markup=get_quality_keyboard(url),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -603,150 +607,83 @@ async def handle_url(message: types.Message):
 async def handle_callback(callback: CallbackQuery):
     data = callback.data
     
-    # ========== АДМИН-ПАНЕЛЬ ==========
-    if data == "admin_stats":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        total_size = 0
-        videos_count = 0
-        audio_count = 0
-        
-        for info in video_cache.values():
-            if os.path.exists(info.get('path', '')):
-                total_size += os.path.getsize(info['path'])
-                if info.get('type') == 'audio':
-                    audio_count += 1
-                else:
-                    videos_count += 1
-        
-        await callback.message.edit_text(
-            f"📊 *Админ-статистика*\n\n"
-            f"🎬 *Видео в кэше:* {videos_count}\n"
-            f"🎵 *Аудио в кэше:* {audio_count}\n"
-            f"📦 *Всего файлов:* {videos_count + audio_count}\n"
-            f"💾 *Занято места:* {total_size/(1024*1024):.1f} МБ\n\n"
-            f"⚡ *FFmpeg:* {'✅' if check_ffmpeg() else '❌'}\n"
-            f"🍪 *Cookies:* {'✅' if os.path.exists(COOKIES_FILE) else '❌'}\n"
-            f"📄 *Лог-файл:* {os.path.getsize(LOG_FILE)/(1024):.1f} КБ" if os.path.exists(LOG_FILE) else "",
-            reply_markup=get_admin_keyboard(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await callback.answer()
-        return
-    
-    elif data == "admin_cache":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        cache_list = ""
-        for i, (vid, info) in enumerate(list(video_cache.items())[:10]):
-            size_mb = info.get('size_mb', 0)
-            cache_list += f"{i+1}. {info['title'][:30]}... - {size_mb:.1f} МБ\n"
-        
-        await callback.message.edit_text(
-            f"💾 *Содержимое кэша* (последние 10)\n\n"
-            f"{cache_list}\n"
-            f"📊 *Всего записей:* {len(video_cache)}",
-            reply_markup=get_admin_keyboard(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await callback.answer()
-        return
-    
-    elif data == "admin_logs":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-                last_lines = lines[-20:] if len(lines) > 20 else lines
-                log_text = "".join(last_lines)
-                await callback.message.edit_text(
-                    f"📋 *Последние логи*\n\n```\n{log_text[:2000]}\n```",
-                    reply_markup=get_admin_keyboard(),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-        else:
-            await callback.message.edit_text("❌ Лог-файл не найден", reply_markup=get_admin_keyboard())
-        await callback.answer()
-        return
-    
-    elif data == "admin_clear_cache":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        global video_cache
-        deleted = 0
-        for info in video_cache.values():
-            if os.path.exists(info.get('path', '')):
-                try:
-                    os.remove(info['path'])
-                    deleted += 1
-                except:
-                    pass
-        video_cache = {}
-        save_cache(video_cache)
-        
-        await callback.message.edit_text(
-            f"🗑️ *Кэш очищен*\n\nУдалено файлов: {deleted}",
-            reply_markup=get_admin_keyboard(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await callback.answer()
-        return
-    
-    elif data == "admin_status":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        await callback.message.edit_text(
-            f"🔄 *Статус системы*\n\n"
-            f"⚡ FFmpeg: {'✅ Работает' if check_ffmpeg() else '❌ Не установлен'}\n"
-            f"🍪 Cookies: {'✅ Загружены' if os.path.exists(COOKIES_FILE) else '❌ Не загружены'}\n"
-            f"💾 Кэш: {len(video_cache)} файлов\n"
-            f"📁 Папки: {'✅' if os.path.exists(DOWNLOAD_DIR) else '❌'}",
-            reply_markup=get_admin_keyboard(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await callback.answer()
-        return
-    
-    elif data == "admin_broadcast":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        await callback.message.edit_text(
-            f"📢 *Рассылка*\n\n"
-            f"Отправьте сообщение для рассылки всем пользователям.\n\n"
-            f"Формат: `/broadcast Текст сообщения`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await callback.answer()
-        return
-    
-    elif data == "admin_close":
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("⛔ Доступ запрещен")
-            return
-        
-        await callback.message.delete()
-        await callback.answer()
-        return
-    
-    # ========== ОСНОВНЫЕ ДЕЙСТВИЯ ==========
     if data == "cancel":
-        await callback.message.edit_text("❌ *Действие отменено*", parse_mode=ParseMode.MARKDOWN)
+        await callback.message.edit_text("❌ *Операция отменена*", parse_mode=ParseMode.MARKDOWN)
         await callback.answer()
         return
     
+    # Админ-панель
+    if data.startswith("admin_"):
+        if not is_admin(callback.from_user.id):
+            await callback.answer("Нет доступа")
+            return
+        
+        if data == "admin_stats":
+            total_size = 0
+            for info in video_cache.values():
+                if os.path.exists(info.get('path', '')):
+                    total_size += os.path.getsize(info['path'])
+            
+            await callback.message.edit_text(
+                f"📊 *Статистика бота*\n\n"
+                f"👥 Пользователей: `{stats.get('total_users', 0)}`\n"
+                f"📥 Скачиваний: `{stats.get('total_downloads', 0)}`\n"
+                f"💾 Скачано: `{stats.get('total_size_mb', 0):.1f} МБ`\n"
+                f"📦 В кэше: `{len(video_cache)}`\n"
+                f"💿 Кэш: `{total_size/(1024*1024):.1f} МБ`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await callback.answer()
+            
+        elif data == "admin_clear_cache":
+            global video_cache
+            deleted = 0
+            for info in video_cache.values():
+                if os.path.exists(info.get('path', '')):
+                    try:
+                        os.remove(info['path'])
+                        deleted += 1
+                    except:
+                        pass
+            video_cache = {}
+            save_cache(video_cache)
+            await callback.message.edit_text(f"🗑️ *Очищено {deleted} файлов*", parse_mode=ParseMode.MARKDOWN)
+            await callback.answer()
+            
+        elif data == "admin_cache_size":
+            total_size = 0
+            for info in video_cache.values():
+                if os.path.exists(info.get('path', '')):
+                    total_size += os.path.getsize(info['path'])
+            await callback.message.edit_text(
+                f"📦 *Размер кэша*\n\n"
+                f"Файлов в кэше: `{len(video_cache)}`\n"
+                f"Занято места: `{total_size/(1024*1024):.1f} МБ`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await callback.answer()
+            
+        elif data == "admin_logs":
+            if os.path.exists(LOG_FILE):
+                with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    last_lines = lines[-50:] if len(lines) > 50 else lines
+                    log_text = "".join(last_lines)
+                    await callback.message.edit_text(
+                        f"📋 *Последние логи*\n\n```\n{log_text[:3000]}\n```",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            else:
+                await callback.message.edit_text("Логов пока нет", parse_mode=ParseMode.MARKDOWN)
+            await callback.answer()
+            
+        elif data == "admin_close":
+            await callback.message.delete()
+            await callback.answer()
+            
+        return
+    
+    # Скачивание видео
     parts = data.split("_", 2)
     if len(parts) < 2:
         await callback.answer("Ошибка")
@@ -758,17 +695,11 @@ async def handle_callback(callback: CallbackQuery):
         quality = parts[1]
         url = parts[2]
         
-        quality_names = {
-            "144p": "144p", "240p": "240p", "360p": "360p",
-            "480p": "480p", "720p": "720p", "1080p": "1080p", "best": "Лучшее"
-        }
-        quality_name = quality_names.get(quality, quality)
-        
+        quality_name = quality
         status_msg = await callback.message.edit_text(
-            f"⏳ *Скачиваю видео*\n\n"
-            f"🎬 Качество: {quality_name}\n"
-            f"📥 Статус: Получение информации...\n\n"
-            f"_Пожалуйста, подождите_",
+            f"⏳ *Скачивание видео*\n\n"
+            f"📹 Качество: `{quality_name}p`\n"
+            f"⏱️ Пожалуйста, подождите...",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -779,19 +710,25 @@ async def handle_callback(callback: CallbackQuery):
             await status_msg.edit_text(
                 f"❌ *Ошибка скачивания*\n\n"
                 f"Возможные причины:\n"
-                f"• Ссылка недействительна\n"
-                f"• Видео удалено или приватно\n"
-                f"• Нет cookies (команда /cookies)\n\n"
-                f"💡 Попробуйте другое качество или получите cookies.",
+                f"• Нет cookies (команда /cookies)\n"
+                f"• Видео недоступно\n"
+                f"• Неподдерживаемое качество\n\n"
+                f"💡 Попробуйте другое качество",
                 parse_mode=ParseMode.MARKDOWN
             )
             await callback.answer()
             return
         
+        # Обновляем статистику
+        stats['total_downloads'] = stats.get('total_downloads', 0) + 1
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        stats['total_size_mb'] = stats.get('total_size_mb', 0) + file_size_mb
+        save_stats(stats)
+        
         await status_msg.edit_text(
             f"📤 *Отправка видео*\n\n"
-            f"🎬 Название: {title[:40]}...\n"
-            f"📦 Статус: Подготовка к отправке...",
+            f"📹 `{title[:50]}...`\n"
+            f"📊 Размер: `{file_size_mb:.1f} МБ`",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -807,10 +744,9 @@ async def handle_callback(callback: CallbackQuery):
         url = parts[1]
         
         status_msg = await callback.message.edit_text(
-            f"⏳ *Скачиваю аудио*\n\n"
+            f"⏳ *Скачивание аудио*\n\n"
             f"🎵 Формат: MP3\n"
-            f"📥 Статус: Получение...\n\n"
-            f"_Пожалуйста, подождите_",
+            f"⏱️ Пожалуйста, подождите...",
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -820,7 +756,7 @@ async def handle_callback(callback: CallbackQuery):
         if not file_path:
             await status_msg.edit_text(
                 f"❌ *Ошибка скачивания аудио*\n\n"
-                f"💡 Попробуйте позже или получите cookies: /cookies",
+                f"💡 Попробуйте загрузить cookies: /cookies",
                 parse_mode=ParseMode.MARKDOWN
             )
             await callback.answer()
@@ -833,35 +769,13 @@ async def handle_callback(callback: CallbackQuery):
             audio_file = FSInputFile(file_path)
             await callback.message.answer_audio(
                 audio=audio_file,
-                caption=f"✅ *{title[:60]}*\n\n"
-                       f"{cache_icon} *Источник:* {'Кэш' if from_cache else 'Новое скачивание'}\n"
-                       f"🎵 *Формат:* MP3\n"
-                       f"💾 *Размер:* {file_size:.1f} МБ",
+                caption=f"✅ *{title[:60]}*\n\n{cache_icon} Формат: `MP3`\n💾 Размер: `{file_size:.1f} МБ`",
                 parse_mode=ParseMode.MARKDOWN
             )
             await status_msg.delete()
             await callback.answer("✅ Готово!")
         except Exception as e:
             await status_msg.edit_text(f"❌ *Ошибка:* `{str(e)[:100]}`", parse_mode=ParseMode.MARKDOWN)
-
-# ==================== РАССЫЛКА ====================
-@dp.message(Command("broadcast"))
-async def broadcast_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ *Доступ запрещен*", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    text = message.text.replace("/broadcast", "").strip()
-    if not text:
-        await message.answer("❌ *Укажите текст для рассылки*\nПример: `/broadcast Привет!`", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    await message.answer(f"📢 *Начинаю рассылку...*\n\nТекст: {text[:100]}", parse_mode=ParseMode.MARKDOWN)
-    
-    # Здесь можно добавить логику рассылки пользователям
-    # Для этого нужно хранить список user_id в отдельном файле
-    
-    await message.answer("✅ *Рассылка завершена*", parse_mode=ParseMode.MARKDOWN)
 
 # ==================== ЗАПУСК ====================
 async def main():
@@ -872,11 +786,12 @@ async def main():
     if ensure_ffmpeg():
         print("✅ FFmpeg готов")
     else:
-        print("⚠️ FFmpeg не установлен")
+        print("❌ FFmpeg не установлен")
     
-    print(f"👑 Админ ID: {ADMIN_ID}")
-    print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
-    print(f"📁 Папка сжатия: {os.path.abspath(COMPRESSED_DIR)}")
+    cookies_status = "✅" if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100 else "❌"
+    print(f"🍪 Cookies: {cookies_status}")
+    print(f"👥 Пользователей: {stats.get('total_users', 0)}")
+    print(f"📥 Всего скачиваний: {stats.get('total_downloads', 0)}")
     print("=" * 60)
     print("✅ БОТ ГОТОВ К РАБОТЕ!")
     print("=" * 60)
