@@ -25,8 +25,7 @@ CACHE_FILE = "video_cache.json"
 LOG_FILE = "bot_log.txt"
 COOKIES_FILE = "cookies.txt"
 
-FILE_LIFETIME_HOURS = 24  # Автоудаление через 24 часа
-MAX_FILE_SIZE_MB = 50  # Максимальный размер для отправки без сжатия
+FILE_LIFETIME_HOURS = 48  # Файлы хранятся 48 часов
 
 for dir_name in [DOWNLOAD_DIR]:
     if not os.path.exists(dir_name):
@@ -62,7 +61,7 @@ def save_cache(cache):
 video_cache = load_cache()
 log_message(f"Загружено {len(video_cache)} записей")
 
-# ==================== АВТОУДАЛЕНИЕ ФАЙЛОВ ====================
+# ==================== АВТОУДАЛЕНИЕ ====================
 def cleanup_old_files():
     try:
         now = datetime.now()
@@ -93,14 +92,13 @@ def cleanup_old_files():
         
         return deleted_count
     except Exception as e:
-        log_message(f"Ошибка автоочистки: {e}", "ERROR")
         return 0
 
-# ==================== ПРОГРЕСС-БАР ДЛЯ СКАЧИВАНИЯ ====================
+# ==================== СКАЧИВАНИЕ ВИДЕО С ПРОГРЕССОМ ====================
 class ProgressHook:
-    def __init__(self, status_message, quality):
-        self.status_message = status_message
-        self.quality = quality
+    def __init__(self, status_msg, quality_name):
+        self.status_msg = status_msg
+        self.quality_name = quality_name
         self.last_percent = 0
         self.start_time = time.time()
     
@@ -108,60 +106,64 @@ class ProgressHook:
         if d['status'] == 'downloading':
             if 'total_bytes' in d:
                 percent = d['downloaded_bytes'] / d['total_bytes'] * 100
-            elif 'total_bytes_estimate' in d:
-                percent = d['downloaded_bytes'] / d['total_bytes_estimate'] * 100
-            else:
-                percent = 0
-            
-            # Обновляем сообщение каждые 5%
-            if int(percent) >= self.last_percent + 5:
-                self.last_percent = int(percent)
-                elapsed = time.time() - self.start_time
-                speed = d.get('speed', 0)
-                if speed:
-                    speed_mb = speed / 1024 / 1024
-                    eta = d.get('eta', 0)
-                    text = (f"⏳ *Скачиваю {self.quality}...*\n"
-                           f"📥 Прогресс: {percent:.0f}%\n"
-                           f"⚡ Скорость: {speed_mb:.1f} МБ/с\n"
-                           f"⏱️ Осталось: {eta} сек")
-                else:
-                    text = f"⏳ *Скачиваю {self.quality}...*\n📥 Прогресс: {percent:.0f}%"
-                
-                asyncio.create_task(self.update_message(text))
+                if percent - self.last_percent >= 5:
+                    self.last_percent = percent
+                    downloaded_mb = d['downloaded_bytes'] / (1024 * 1024)
+                    total_mb = d['total_bytes'] / (1024 * 1024)
+                    speed = d.get('speed', 0)
+                    speed_mb = speed / (1024 * 1024) if speed else 0
+                    
+                    # Оценка оставшегося времени
+                    if speed > 0:
+                        remaining = (d['total_bytes'] - d['downloaded_bytes']) / speed
+                        remaining_min = int(remaining // 60)
+                        remaining_sec = int(remaining % 60)
+                        time_str = f"{remaining_min}м {remaining_sec}с" if remaining_min > 0 else f"{remaining_sec}с"
+                    else:
+                        time_str = "?"
+                    
+                    # Обновляем сообщение асинхронно
+                    asyncio.create_task(self.update_status(percent, downloaded_mb, total_mb, speed_mb, time_str))
         
         elif d['status'] == 'finished':
-            asyncio.create_task(self.update_message(f"✅ *Скачивание завершено!*\n🎬 Обработка видео..."))
+            asyncio.create_task(self.status_msg.edit_text(f"✅ *Скачивание завершено!*\n🎬 Качество: {self.quality_name}\n⏳ Обработка видео...", parse_mode=ParseMode.MARKDOWN))
     
-    async def update_message(self, text):
+    async def update_status(self, percent, downloaded, total, speed, time_str):
         try:
-            await self.status_message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+            await self.status_msg.edit_text(
+                f"⏳ *Скачиваю {self.quality_name}...*\n"
+                f"📊 Прогресс: `{percent:.1f}%`\n"
+                f"📦 Загружено: {downloaded:.1f} / {total:.1f} МБ\n"
+                f"⚡ Скорость: {speed:.1f} МБ/с\n"
+                f"⏱️ Осталось: {time_str}",
+                parse_mode=ParseMode.MARKDOWN
+            )
         except:
             pass
 
-# ==================== СКАЧИВАНИЕ ВИДЕО ====================
-async def download_video_async(url: str, quality: str, status_message):
-    """Асинхронное скачивание видео с прогрессом"""
+def download_video_sync(url: str, quality: str, progress_hook=None):
+    """
+    Скачивание видео с YouTube
+    quality: 144, 240, 360, 480, 720, 1080, best
+    """
     video_id = hashlib.md5(f"{url}_{quality}".encode()).hexdigest()
     
-    # Проверка кэша
     if video_id in video_cache:
         cached = video_cache[video_id]
         if os.path.exists(cached['path']):
             log_message(f"✅ Из кэша: {cached['title'][:40]}")
             return cached['path'], cached['title'], True
-    
-    # Настройки качества
+
     height_map = {
         "144": 144, "240": 240, "360": 360,
         "480": 480, "720": 720, "1080": 1080, "best": 2160
     }
     target_h = height_map.get(quality, 720)
     
-    # Для больших качеств используем сжатие
-    if target_h >= 720:
-        # Ограничиваем битрейт для 720p+
-        format_spec = f'bestvideo[height<={target_h}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<={target_h}][ext=mp4]'
+    # Для 1080p используем формат с возможностью сжатия
+    if target_h >= 1080:
+        # Пробуем скачать в хорошем качестве, но с ограничением
+        format_spec = f'bestvideo[height<={target_h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={target_h}][ext=mp4]/best[ext=mp4]'
     else:
         format_spec = f'bestvideo[height<={target_h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={target_h}][ext=mp4]'
     
@@ -177,7 +179,7 @@ async def download_video_async(url: str, quality: str, status_message):
         'socket_timeout': 60,
         'retries': 10,
         'fragment_retries': 10,
-        'progress_hooks': [ProgressHook(status_message, f"{quality}p")],
+        'continuedl': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -185,17 +187,18 @@ async def download_video_async(url: str, quality: str, status_message):
         }
     }
     
-    # Добавляем cookies если есть
+    if progress_hook:
+        opts['progress_hooks'] = [progress_hook]
+    
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
         opts['cookiefile'] = COOKIES_FILE
-    
+
     try:
         with YoutubeDL(opts) as ydl:
-            info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            info = ydl.extract_info(url, download=True)
             title = info.get('title', 'video')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
-            # Поиск файла
             filename = None
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.endswith('.mp4') and title in f:
@@ -228,9 +231,7 @@ async def download_video_async(url: str, quality: str, status_message):
         log_message(f"❌ Ошибка скачивания: {e}", "ERROR")
         return None, None, False
 
-# ==================== СКАЧИВАНИЕ АУДИО ====================
-async def download_audio_async(url: str, status_message):
-    """Асинхронное скачивание аудио"""
+def download_audio_sync(url: str, progress_hook=None):
     audio_id = hashlib.md5(f"{url}_mp3".encode()).hexdigest()
     
     if audio_id in video_cache:
@@ -251,18 +252,22 @@ async def download_audio_async(url: str, status_message):
             'preferredquality': '192',
         }],
         'geo_bypass': True,
-        'progress_hooks': [ProgressHook(status_message, "MP3")],
+        'socket_timeout': 60,
+        'retries': 10,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         }
     }
+    
+    if progress_hook:
+        opts['progress_hooks'] = [progress_hook]
     
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
         opts['cookiefile'] = COOKIES_FILE
     
     try:
         with YoutubeDL(opts) as ydl:
-            info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            info = ydl.extract_info(url, download=True)
             title = info.get('title', 'audio')
             title = "".join(c for c in title if c not in r'\/:*?"<>|')
             
@@ -280,7 +285,7 @@ async def download_audio_async(url: str, status_message):
                     return None, None, False
             
             file_size = os.path.getsize(filename) / (1024 * 1024)
-            log_message(f"✅ Аудио скачано: {title[:40]}... ({file_size:.1f} МБ)")
+            log_message(f"✅ Аудио: {title[:40]}... ({file_size:.1f} МБ)")
             
             video_cache[audio_id] = {
                 'path': filename,
@@ -297,6 +302,40 @@ async def download_audio_async(url: str, status_message):
     except Exception as e:
         log_message(f"❌ Ошибка аудио: {e}", "ERROR")
         return None, None, False
+
+# ==================== ОТПРАВКА ФАЙЛОВ ====================
+async def send_video_smart(message, file_path, title, quality_name, from_cache=False):
+    """Умная отправка видео - если >50 МБ отправляет как документ"""
+    file_size = os.path.getsize(file_path) / (1024 * 1024)
+    cache_text = " 📀 (из кэша)" if from_cache else ""
+    
+    try:
+        if file_size <= 50:
+            # Маленькое видео - отправляем как видео
+            video = FSInputFile(file_path)
+            await message.answer_video(
+                video,
+                caption=f"✅ *{title[:70]}*{cache_text}\n"
+                        f"🎬 Качество: {quality_name} | 📦 {file_size:.1f} МБ",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            log_message(f"📤 Отправлено как видео ({file_size:.1f} МБ)")
+        else:
+            # Большое видео - отправляем как документ (до 2 ГБ)
+            document = FSInputFile(file_path)
+            await message.answer_document(
+                document,
+                caption=f"✅ *{title[:70]}*{cache_text}\n"
+                        f"🎬 Качество: {quality_name} | 📦 {file_size:.1f} МБ\n\n"
+                        f"⚠️ *Видео превышает 50 МБ*, поэтому отправлено как файл.\n"
+                        f"📥 Скачайте файл, чтобы посмотреть видео.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            log_message(f"📤 Отправлено как документ ({file_size:.1f} МБ)")
+        return True
+    except Exception as e:
+        log_message(f"❌ Ошибка отправки: {e}", "ERROR")
+        return False
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 def is_admin(user_id):
@@ -371,12 +410,7 @@ async def admin_cookies_status(message):
         size = os.path.getsize(COOKIES_FILE)
         await message.answer(f"🍪 *Cookies*: ✅ найден\n📦 Размер: {size} байт", parse_mode=ParseMode.MARKDOWN)
     else:
-        await message.answer(
-            "🍪 *Cookies*: ❌ не найден\n\n"
-            "📤 Отправьте файл cookies.txt боту\n"
-            "Инструкция: /cookies",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await message.answer("🍪 *Cookies*: ❌ не найден\n📤 Отправьте файл cookies.txt", parse_mode=ParseMode.MARKDOWN)
 
 # ==================== БОТ ====================
 bot = Bot(token=BOT_TOKEN)
@@ -389,9 +423,9 @@ def get_quality_keyboard(url: str):
          InlineKeyboardButton(text="🎬 360p", callback_data=f"vid_360_{url}")],
         [InlineKeyboardButton(text="🎬 480p", callback_data=f"vid_480_{url}"),
          InlineKeyboardButton(text="🎬 720p (рекомендуется)", callback_data=f"vid_720_{url}"),
-         InlineKeyboardButton(text="🎬 1080p (может быть долго)", callback_data=f"vid_1080_{url}")],
-        [InlineKeyboardButton(text="🏆 Лучшее (очень долго)", callback_data=f"vid_best_{url}"),
-         InlineKeyboardButton(text="🎵 MP3 (быстро)", callback_data=f"audio_{url}")],
+         InlineKeyboardButton(text="🎬 1080p (Full HD)", callback_data=f"vid_1080_{url}")],
+        [InlineKeyboardButton(text="🏆 Лучшее качество", callback_data=f"vid_best_{url}"),
+         InlineKeyboardButton(text="🎵 MP3 (только аудио)", callback_data=f"audio_{url}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
     ])
 
@@ -399,11 +433,17 @@ def get_quality_keyboard(url: str):
 async def start_cmd(message: types.Message):
     await message.answer(
         "🎬 *YouTube Видео-Бот*\n\n"
-        "📹 Отправьте ссылку на YouTube видео\n\n"
-        "*⚡ Важно:*\n"
-        "• 720p — оптимальный выбор по качеству и скорости\n"
-        "• 1080p и выше могут скачиваться 2-5 минут\n"
-        "• MP3 скачивается быстрее всего\n\n"
+        "📹 Отправьте ссылку на YouTube видео, и я скачаю его.\n\n"
+        "*🎮 Доступные качества:*\n"
+        "• 144p — самое маленькое, быстро\n"
+        "• 240p, 360p, 480p — среднее качество\n"
+        "• 720p — оптимальный выбор\n"
+        "• 1080p — Full HD (может долго скачиваться)\n"
+        "• MP3 — только аудио\n\n"
+        "*⚡ Особенности:*\n"
+        "• Прогресс-бар скачивания\n"
+        "• Видео >50 МБ отправляются как файл\n"
+        "• Кэширование — повторно мгновенно\n\n"
         "📥 /cookies — инструкция\n"
         "🔧 /admin — админ-панель",
         parse_mode=ParseMode.MARKDOWN
@@ -437,35 +477,25 @@ async def handle_document(message: types.Message):
                 f.write(data.getvalue())
             size = os.path.getsize(COOKIES_FILE)
             await status.edit_text(f"✅ *Cookies загружены!* ({size} байт)", parse_mode=ParseMode.MARKDOWN)
-            log_message(f"Cookies загружены пользователем {message.from_user.id}")
+            log_message(f"✅ Cookies загружены пользователем {message.from_user.id}")
         except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
+            await message.answer(f"❌ *Ошибка:* {e}", parse_mode=ParseMode.MARKDOWN)
     else:
-        await message.answer("❌ Отправьте файл `cookies.txt`", parse_mode=ParseMode.MARKDOWN)
+        await message.answer("❌ *Отправьте файл cookies.txt*", parse_mode=ParseMode.MARKDOWN)
 
 @dp.message()
 async def handle_url(message: types.Message):
     url = message.text.strip()
-    log_message(f"Ссылка: {url[:80]}")
+    log_message(f"🔗 Ссылка: {url[:80]}")
     
     if not (url.startswith("http://") or url.startswith("https://")):
         await message.answer("❌ *Отправьте ссылку на видео*", parse_mode=ParseMode.MARKDOWN)
         return
     
-    # Проверяем cookies
-    if not os.path.exists(COOKIES_FILE) or os.path.getsize(COOKIES_FILE) < 100:
-        await message.answer(
-            "⚠️ *Внимание!*\n\n"
-            "Для быстрого скачивания нужны cookies.\n"
-            "Отправьте /cookies для инструкции.\n\n"
-            "Вы всё равно можете скачать видео, но может быть медленно.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
     await message.answer(
         "🎥 *Выберите качество:*\n\n"
-        "💡 720p — оптимальный выбор\n"
-        "⚡ MP3 — самый быстрый вариант",
+        "💡 *Совет:* Для быстрой загрузки выбирайте 720p или ниже.\n"
+        "1080p может скачиваться долго (3-10 минут).",
         reply_markup=get_quality_keyboard(url),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -499,7 +529,7 @@ async def callback_handler(call: CallbackQuery):
         await call.answer()
         return
 
-    # Обработка видео
+    # Обработка выбора качества
     parts = data.split("_", 2)
     if len(parts) < 2:
         await call.answer("Ошибка")
@@ -517,127 +547,65 @@ async def callback_handler(call: CallbackQuery):
         }
         quality_name = quality_names.get(quality, quality + "p")
         
-        # Предупреждение для больших качеств
-        if quality in ["1080", "best"]:
-            confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Да, скачать", callback_data=f"confirm_{quality}_{url}")],
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
-            ])
-            await call.message.edit_text(
-                f"⚠️ *Внимание!*\n\n"
-                f"Качество {quality_name} может скачиваться 3-5 минут\n"
-                f"Размер файла может быть 1-3 ГБ\n\n"
-                f"Продолжить?",
-                reply_markup=confirm_kb,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await call.answer()
-            return
-        
-        # Для 720p и ниже скачиваем сразу
+        # Создаем прогресс-хук
         status_msg = await call.message.edit_text(
-            f"⏳ *Скачиваю {quality_name}...*\n"
-            f"Это может занять 1-3 минуты",
+            f"⏳ *Начинаю скачивание {quality_name}...*\n"
+            f"📹 Это может занять 1-5 минут в зависимости от качества",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        file_path, title, from_cache = await download_video_async(url, quality, status_msg)
+        progress_hook = ProgressHook(status_msg, quality_name)
+        
+        loop = asyncio.get_event_loop()
+        file_path, title, from_cache = await loop.run_in_executor(
+            None, download_video_sync, url, quality, progress_hook
+        )
         
         if not file_path:
             await status_msg.edit_text(
                 "❌ *Ошибка скачивания*\n\n"
-                "Попробуйте:\n"
-                "• Получить cookies (/cookies)\n"
-                "• Выбрать качество ниже\n"
-                "• Проверить ссылку",
+                "Возможные причины:\n"
+                "• Нужны cookies (/cookies)\n"
+                "• Видео удалено или приватно\n"
+                "• Качество недоступно\n\n"
+                "Попробуйте другое качество.",
                 parse_mode=ParseMode.MARKDOWN
             )
             await call.answer()
             return
         
-        file_size = os.path.getsize(file_path) / (1024 * 1024)
-        cache_text = " 📀 (из кэша)" if from_cache else ""
-        
         await status_msg.edit_text(f"📤 *Отправляю видео...*", parse_mode=ParseMode.MARKDOWN)
         
-        try:
-            video = FSInputFile(file_path)
-            await call.message.answer_video(
-                video,
-                caption=f"✅ *{title[:70]}*{cache_text}\n"
-                        f"🎬 {quality_name} | 📦 {file_size:.1f} МБ",
-                parse_mode=ParseMode.MARKDOWN
-            )
+        success = await send_video_smart(call.message, file_path, title, quality_name, from_cache)
+        
+        if success:
             await status_msg.delete()
-            await call.answer("✅ Видео отправлено!")
-        except Exception as e:
-            if "Too Large" in str(e) or "413" in str(e):
-                await status_msg.edit_text(
-                    f"⚠️ *Видео слишком большое* ({file_size:.1f} МБ)\n\n"
-                    f"Telegram не может отправить файл >50 МБ.\n"
-                    f"Попробуйте качество ниже (720p или 480p).",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await status_msg.edit_text(f"❌ *Ошибка отправки:* {str(e)[:100]}", parse_mode=ParseMode.MARKDOWN)
-            await call.answer()
-    
-    elif action == "confirm":
-        # Подтверждение для 1080p/best
-        quality = parts[1]
-        url = parts[2]
-        quality_names = {"1080": "1080p", "best": "лучшее"}
-        quality_name = quality_names.get(quality, quality + "p")
-        
-        status_msg = await call.message.edit_text(
-            f"⏳ *Скачиваю {quality_name}...*\n"
-            f"⏱️ Это займёт 3-5 минут",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        file_path, title, from_cache = await download_video_async(url, quality, status_msg)
-        
-        if not file_path:
-            await status_msg.edit_text("❌ *Ошибка скачивания*", parse_mode=ParseMode.MARKDOWN)
-            await call.answer()
-            return
-        
-        file_size = os.path.getsize(file_path) / (1024 * 1024)
-        
-        if file_size > MAX_FILE_SIZE_MB:
-            await status_msg.edit_text(
-                f"⚠️ *Видео слишком большое* ({file_size:.1f} МБ)\n\n"
-                f"Telegram не может отправить файл >50 МБ.\n"
-                f"Попробуйте качество 720p или ниже.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await call.answer()
-            return
-        
-        await status_msg.edit_text(f"📤 *Отправляю видео...*", parse_mode=ParseMode.MARKDOWN)
-        
-        video = FSInputFile(file_path)
-        await call.message.answer_video(
-            video,
-            caption=f"✅ *{title[:70]}*\n🎬 {quality_name} | 📦 {file_size:.1f} МБ",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        await status_msg.delete()
-        await call.answer("✅ Видео отправлено!")
+            await call.answer("✅ Готово!")
+        else:
+            await call.answer("❌ Ошибка отправки")
     
     elif action == "audio":
         url = parts[1]
         
         status_msg = await call.message.edit_text(
             "⏳ *Скачиваю аудио в MP3...*\n"
-            "⏱️ Обычно 30-60 секунд",
+            "🎵 Это может занять 1-2 минуты",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        file_path, title, from_cache = await download_audio_async(url, status_msg)
+        progress_hook = ProgressHook(status_msg, "MP3")
+        
+        loop = asyncio.get_event_loop()
+        file_path, title, from_cache = await loop.run_in_executor(
+            None, download_audio_sync, url, progress_hook
+        )
         
         if not file_path:
-            await status_msg.edit_text("❌ *Ошибка скачивания аудио*", parse_mode=ParseMode.MARKDOWN)
+            await status_msg.edit_text(
+                "❌ *Ошибка скачивания аудио*\n"
+                "Попробуйте позже или получите cookies (/cookies)",
+                parse_mode=ParseMode.MARKDOWN
+            )
             await call.answer()
             return
         
@@ -649,9 +617,11 @@ async def callback_handler(call: CallbackQuery):
         audio = FSInputFile(file_path)
         await call.message.answer_audio(
             audio,
-            caption=f"✅ *{title[:70]}*{cache_text}\n🎵 MP3 | 📦 {file_size:.1f} МБ",
+            caption=f"✅ *{title[:70]}*{cache_text}\n"
+                    f"🎵 MP3 | 📦 {file_size:.1f} МБ",
             parse_mode=ParseMode.MARKDOWN
         )
+        
         await status_msg.delete()
         await call.answer("✅ Аудио отправлено!")
 
@@ -664,16 +634,17 @@ async def main():
     if os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 100:
         print("✅ Cookies загружены")
     else:
-        print("⚠️ Cookies не найдены - отправьте файл cookies.txt боту")
+        print("⚠️ Cookies не найдены - отправьте cookies.txt боту")
     
     deleted = cleanup_old_files()
     if deleted > 0:
         print(f"🗑️ Удалено {deleted} старых файлов")
     
     print(f"📁 Папка загрузок: {os.path.abspath(DOWNLOAD_DIR)}")
-    print(f"📦 Макс. размер отправки: {MAX_FILE_SIZE_MB} МБ")
+    print(f"👥 Администраторы: {ADMIN_IDS}")
     print("=" * 60)
     print("✅ БОТ ГОТОВ!")
+    print("📌 Отправьте ссылку на YouTube видео")
     print("=" * 60)
     
     async def periodic_cleanup():
